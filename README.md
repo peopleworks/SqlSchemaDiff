@@ -334,3 +334,10 @@ dotnet restore .\SqlSchemaDiff.csproj
 dotnet build .\SqlSchemaDiff.csproj
 dotnet publish .\SqlSchemaDiff.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true
 ```
+
+---
+
+<p align="center">
+  <strong>Created by PeopleWorks using Codex</strong><br/>
+  SQLDiff • SQL Server schema sync for real-world deployments
+</p>
