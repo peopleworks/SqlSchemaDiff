@@ -2,6 +2,8 @@
 
 SQLDiff is a SQL Server schema synchronization CLI.
 
+Created by PeopleWorks using Codex.
+
 Primary goals:
 - Extract schema from a source database.
 - Compare source vs target.
