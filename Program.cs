@@ -125,6 +125,7 @@ internal static class ProgramMain
 
         Console.WriteLine(
             $"Resumen: added={result.Added}, changed={result.Changed}, removed={result.Removed}, skipped={result.Skipped}");
+        PrintDiffObjects(result);
 
         if(mode == "drift")
             return result.HasChanges ? 2 : 0;
@@ -227,6 +228,7 @@ internal static class ProgramMain
         Console.WriteLine($"Sync SQL generado en: {Path.GetFullPath(outPath)}");
         Console.WriteLine(
             $"Resumen: added={result.Added}, changed={result.Changed}, removed={result.Removed}, skipped={result.Skipped}");
+        PrintDiffObjects(result);
 
         if(!apply)
             return 0;
@@ -311,6 +313,20 @@ internal static class ProgramMain
 
         var extractor = new SqlServerSchemaExtractor();
         return await extractor.ExtractAsync(connectionString, CancellationToken.None);
+    }
+
+    private static void PrintDiffObjects(DiffResult result)
+    {
+        PrintObjectList("Added", result.AddedObjects);
+        PrintObjectList("Changed", result.ChangedObjects);
+        PrintObjectList("Removed", result.RemovedObjects);
+    }
+
+    private static void PrintObjectList(string label, List<string> items)
+    {
+        if(items.Count == 0)
+            return;
+        Console.WriteLine($"  {label} ({items.Count}): {string.Join(", ", items)}");
     }
 
     private static void PrintSnapshotSummary(string label, DatabaseSnapshot snapshot)

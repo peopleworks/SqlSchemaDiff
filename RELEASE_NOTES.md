@@ -15,6 +15,15 @@
   procedures, functions or foreign keys. `sys.objects.type` is `char(2)`, so single-char
   codes arrive space-padded (`"U "`); the type code is now trimmed before mapping.
   Regression-tested against padded codes.
+- Fixed views/procedures/functions never converging (staying `changed` on every diff).
+  Comments preceding a `CREATE VIEW/PROCEDURE/FUNCTION` shared its batch, so SQL Server
+  stored them as part of the object definition in `sys.sql_modules`. Each object's CREATE
+  is now isolated in its own batch (a `GO` separates comments), keeping definitions clean.
+  The next apply self-heals already-polluted objects.
+
+### Reporting
+- `diff` / `drift` / `sync` now print the identifiers of added, changed and removed
+  objects (not just counts), so it is clear exactly what differs.
 
 ## v1.1.0
 
