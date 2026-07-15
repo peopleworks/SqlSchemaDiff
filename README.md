@@ -156,7 +156,14 @@ deploy (--source-conn <cs> | --source-snapshot <json>)
 ### `apply`
 ```text
 apply --conn <connectionString> --script <diff.sql> [--dry-run] [--timeout-seconds 120]
+      [--no-transaction] [--log apply.log]
 ```
+
+By default `apply` (and `sync`/`deploy`) run **inside a single transaction**: if any
+batch fails, the whole change is rolled back and the target is left untouched
+(SQL Server DDL is transactional). Pass `--no-transaction` to execute batch-by-batch
+without atomicity. Pass `--log <file>` to append an audit entry (timestamp, server,
+database, script, batches executed, outcome) for each run.
 
 ### `check-conn`
 ```text
