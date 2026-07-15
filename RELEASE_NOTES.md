@@ -1,5 +1,15 @@
 # Release Notes
 
+## v1.2.0 (unreleased)
+
+### Highlights
+- **Transactional apply** (default): all batches run in one transaction and roll back
+  together on any failure, leaving the target untouched. Opt out with `--no-transaction`.
+- **Audit log** via `--log <file>`: records timestamp, server, database, script,
+  batches executed and outcome (applied / rolled-back / failed) for every run.
+- **Unit test project** (`tests/SqlSchemaDiff.Tests`, xUnit): 26 tests covering the
+  column-level differ, schema differ, batch splitter and SQL rendering.
+
 ## v1.1.0
 
 ### Highlights

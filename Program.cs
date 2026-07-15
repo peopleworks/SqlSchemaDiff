@@ -142,20 +142,57 @@ internal static class ProgramMain
             return Fail($"No existe el script: {scriptPath}");
 
         var script = await File.ReadAllTextAsync(scriptPath);
-        var executor = new SqlBatchExecutor();
-        var batchCount = await executor.ExecuteAsync(
-            connectionString,
-            script,
-            dryRun,
-            timeoutSeconds,
-            CancellationToken.None);
+        var execResult = await ExecuteAndLogAsync(options, "apply", connectionString, script, scriptPath, dryRun, timeoutSeconds);
 
-        if(dryRun)
-            Console.WriteLine($"Dry-run OK. Lotes detectados: {batchCount}");
-        else
-            Console.WriteLine($"Script aplicado correctamente. Lotes ejecutados: {batchCount}");
-
+        PrintExecutionResult(execResult, dryRun);
         return 0;
+    }
+
+    private static async Task<BatchExecutionResult> ExecuteAndLogAsync(
+        CliOptions options,
+        string command,
+        string connectionString,
+        string script,
+        string? scriptPath,
+        bool dryRun,
+        int timeoutSeconds)
+    {
+        var useTransaction = !options.GetBool("--no-transaction", defaultValue: false);
+        var logPath = options.Get("--log");
+        var executor = new SqlBatchExecutor();
+        var startedUtc = DateTimeOffset.UtcNow;
+
+        try
+        {
+            var result = await executor.ExecuteAsync(
+                connectionString, script, dryRun, timeoutSeconds, useTransaction, CancellationToken.None);
+
+            if(!dryRun && !string.IsNullOrWhiteSpace(logPath))
+                await AuditLogger.AppendAsync(
+                    logPath, command, connectionString, scriptPath, result, "applied", null, startedUtc, CancellationToken.None);
+
+            return result;
+        }
+        catch(Exception ex)
+        {
+            if(!dryRun && !string.IsNullOrWhiteSpace(logPath))
+                await AuditLogger.AppendAsync(
+                    logPath, command, connectionString, scriptPath, null,
+                    useTransaction ? "rolled-back" : "failed", ex.Message, startedUtc, CancellationToken.None);
+            throw;
+        }
+    }
+
+    private static void PrintExecutionResult(BatchExecutionResult result, bool dryRun)
+    {
+        if(dryRun)
+        {
+            Console.WriteLine($"Dry-run OK. Lotes detectados: {result.BatchCount}");
+            return;
+        }
+
+        var mode = result.Transactional ? " (transaccional)" : string.Empty;
+        Console.WriteLine($"Script aplicado correctamente. Lotes ejecutados: {result.Executed}{mode}");
     }
 
     private static async Task<int> RunSyncAsync(CliOptions options, bool forceApply)
@@ -200,18 +237,14 @@ internal static class ProgramMain
             return Fail("Para aplicar cambios debe indicar --target-conn (o --target-connection).");
         }
 
-        var executor = new SqlBatchExecutor();
-        var batchCount = await executor.ExecuteAsync(
-            targetConn,
-            result.Script,
-            dryRun,
-            timeoutSeconds,
-            CancellationToken.None);
+        var execResult = await ExecuteAndLogAsync(
+            options, forceApply ? "deploy" : "sync", targetConn, result.Script, null, dryRun, timeoutSeconds);
 
         if(dryRun)
-            Console.WriteLine($"Dry-run OK. Lotes detectados: {batchCount}");
+            Console.WriteLine($"Dry-run OK. Lotes detectados: {execResult.BatchCount}");
         else
-            Console.WriteLine($"Sync aplicado correctamente. Lotes ejecutados: {batchCount}");
+            Console.WriteLine($"Sync aplicado correctamente. Lotes ejecutados: {execResult.Executed}" +
+                              (execResult.Transactional ? " (transaccional)" : string.Empty));
 
         return 0;
     }
@@ -323,11 +356,17 @@ internal static class ProgramMain
                        (--target-conn <cs> | --target-snapshot <json>)
                        [--out diff.sql] [--include-drops] [--include-table-drops] [--allow-table-rebuild] [--add-only]
               apply    --conn <connectionString> --script <diff.sql> [--dry-run] [--timeout-seconds 120]
+                       [--no-transaction] [--log apply.log]
               sync     (--source-conn <cs> | --source-snapshot <json>)
                        (--target-conn <cs> | --target-snapshot <json>) [--out sync.diff.sql]
                        [--include-drops] [--include-table-drops] [--allow-table-rebuild] [--add-only]
-                       [--apply] [--dry-run] [--timeout-seconds 120]
+                       [--apply] [--dry-run] [--timeout-seconds 120] [--no-transaction] [--log apply.log]
               deploy   Igual a sync, pero siempre aplica (diff + apply en un solo comando).
+
+            Apply seguro:
+              Por defecto el apply es transaccional: si un lote falla, se revierte todo
+              (rollback) y el destino queda intacto. Use --no-transaction para desactivarlo.
+              Use --log <archivo> para registrar una auditoria de lo aplicado.
               check-conn (--conn <cs> | --source-conn <cs> [--target-conn <cs>]) [--timeout-seconds 15]
               drift    Igual a diff, pero retorna codigo 2 si hay diferencias.
                        Por defecto en drift: include-drops=true e include-table-drops=true.
