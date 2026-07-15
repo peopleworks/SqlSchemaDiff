@@ -12,6 +12,20 @@ Primary goals:
 
 This README is **EXE-first** for client/server operations.
 
+## What's new (v1.1 – v1.2)
+
+- **Column-level table sync** — changed tables are updated with incremental
+  `ALTER TABLE` statements that **preserve data**, instead of being skipped or rebuilt.
+- **Transactional apply** — `apply`/`sync`/`deploy` run in one transaction and roll back
+  atomically on failure (`--no-transaction` to opt out); optional `--log` audit trail.
+- **Object-level reporting** — `diff`/`drift`/`sync` print the names of added, changed
+  and removed objects, not just counts.
+- **Structural table comparison** — tables are compared by structure (columns,
+  constraints, indexes), so cosmetic-only differences such as column ordering are **not**
+  reported as drift.
+- **Fixes** — space-padded object type codes (`U`), and comments being baked into
+  view/procedure/function definitions (which caused permanent drift). See `RELEASE_NOTES.md`.
+
 ## 1) Quick Start (EXE)
 
 Assumption: you are in the folder where `SqlSchemaDiff.exe` is located.
@@ -94,6 +108,28 @@ annotated with `-- WARNING:` comments in the script, for example:
 Use `--allow-table-rebuild` only when you explicitly want a full `DROP`/`CREATE`
 (this can cause data loss). Legacy snapshots without structured table metadata fall
 back to the previous skip-with-warning behavior.
+
+## 4.1.2) Structural Comparison (column order is not drift)
+
+Tables with structured metadata are compared **structurally** — columns, constraints and
+indexes matched by name — not by comparing the rendered `CREATE TABLE` text. This means:
+
+- The **same columns in a different physical order** are treated as equal (reordering a
+  column would require a destructive rebuild, so it is intentionally ignored).
+- A table is reported as `changed` only when there is an **actionable, data-safe**
+  difference. `drift` therefore converges to `0` for structurally-identical schemas.
+
+Programmable objects (views, procedures, functions) are still compared by normalized text.
+
+## 4.1.3) Object-Level Reporting
+
+`diff`, `drift` and `sync` print the identifiers of the objects involved, e.g.:
+
+```text
+Resumen: added=1, changed=1, removed=0, skipped=0
+  Added (1): [dbo].[Department]
+  Changed (1): [dbo].[Employee]
+```
 
 ## 4.1.1) Dependency-Aware Ordering
 
