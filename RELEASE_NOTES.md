@@ -7,8 +7,14 @@
   together on any failure, leaving the target untouched. Opt out with `--no-transaction`.
 - **Audit log** via `--log <file>`: records timestamp, server, database, script,
   batches executed and outcome (applied / rolled-back / failed) for every run.
-- **Unit test project** (`tests/SqlSchemaDiff.Tests`, xUnit): 26 tests covering the
-  column-level differ, schema differ, batch splitter and SQL rendering.
+- **Unit test project** (`tests/SqlSchemaDiff.Tests`, xUnit): 36 tests covering the
+  column-level differ, schema differ, batch splitter, SQL rendering and type mapping.
+
+### Fixes
+- Fixed `ERROR: Unsupported SQL object type code: U` when a database contains views,
+  procedures, functions or foreign keys. `sys.objects.type` is `char(2)`, so single-char
+  codes arrive space-padded (`"U "`); the type code is now trimmed before mapping.
+  Regression-tested against padded codes.
 
 ## v1.1.0
 

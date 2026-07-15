@@ -186,13 +186,14 @@ public sealed class SqlServerSchemaExtractor
             kvp => kvp.Value.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList());
     }
 
-    private static DbObjectType ToDbObjectType(string typeCode) => typeCode switch
+    internal static DbObjectType ToDbObjectType(string typeCode) => typeCode.Trim() switch
     {
+        // sys.objects.type is char(2): single-char codes come back space-padded ("U ").
         "U" => DbObjectType.Table,
         "V" => DbObjectType.View,
         "P" => DbObjectType.StoredProcedure,
         "FN" or "IF" or "TF" or "FS" or "FT" => DbObjectType.Function,
-        _ => throw new InvalidOperationException($"Unsupported SQL object type code: {typeCode}")
+        _ => throw new InvalidOperationException($"Unsupported SQL object type code: '{typeCode.Trim()}'")
     };
 
     private static async Task<TableModel> BuildTableModelAsync(SqlConnection connection, TableInfo table, CancellationToken cancellationToken)
