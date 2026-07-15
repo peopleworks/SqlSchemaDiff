@@ -1,5 +1,3 @@
-using System.Data;
-using System.Text;
 using Microsoft.Data.SqlClient;
 using SqlSchemaDiff.Models;
 
@@ -56,14 +54,21 @@ public sealed class SqlServerSchemaExtractor
         var result = new List<DbSchemaObject>(tables.Count);
         foreach(var table in tables)
         {
-            var tableScript = await BuildTableScriptAsync(connection, table, cancellationToken);
+            var model = await BuildTableModelAsync(connection, table, cancellationToken);
+            var dependencies = model.ForeignKeys
+                .Select(x => BuildKey(DbObjectType.Table, x.ReferencedSchema, x.ReferencedTable))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
             result.Add(new DbSchemaObject
             {
                 Type = DbObjectType.Table,
                 Schema = table.Schema,
                 Name = table.Name,
-                Definition = tableScript.Script,
-                Dependencies = tableScript.Dependencies
+                Definition = SqlRender.BuildTableCreateScript(model),
+                Dependencies = dependencies,
+                Table = model
             });
         }
 
@@ -190,124 +195,21 @@ public sealed class SqlServerSchemaExtractor
         _ => throw new InvalidOperationException($"Unsupported SQL object type code: {typeCode}")
     };
 
-    private static async Task<TableScriptResult> BuildTableScriptAsync(SqlConnection connection, TableInfo table, CancellationToken cancellationToken)
+    private static async Task<TableModel> BuildTableModelAsync(SqlConnection connection, TableInfo table, CancellationToken cancellationToken)
     {
-        var columns = await GetColumnsAsync(connection, table.ObjectId, cancellationToken);
-        var keyConstraints = await GetKeyConstraintsAsync(connection, table.ObjectId, cancellationToken);
-        var foreignKeys = await GetForeignKeysAsync(connection, table.ObjectId, cancellationToken);
-        var checkConstraints = await GetCheckConstraintsAsync(connection, table.ObjectId, cancellationToken);
-        var indexes = await GetIndexesAsync(connection, table.ObjectId, cancellationToken);
-        var dependencies = foreignKeys
-            .Select(x => BuildKey(DbObjectType.Table, x.ReferencedSchema, x.ReferencedTable))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        var tableIdentifier = Quote(table.Schema, table.Name);
-        var sb = new StringBuilder();
-        sb.AppendLine($"CREATE TABLE {tableIdentifier}");
-        sb.AppendLine("(");
-        for(var i = 0; i < columns.Count; i++)
+        return new TableModel
         {
-            var isLastColumn = i == columns.Count - 1;
-            sb.Append("    ");
-            sb.Append(BuildColumnDefinition(columns[i]));
-            if(!isLastColumn)
-                sb.Append(',');
-            sb.AppendLine();
-        }
-        sb.AppendLine(");");
-        sb.AppendLine("GO");
-        sb.AppendLine();
-
-        foreach(var keyConstraint in keyConstraints)
-        {
-            var columnsSql = string.Join(", ", keyConstraint.Columns.Select(BuildIndexColumnExpression));
-            var constraintKind = keyConstraint.TypeCode == "PK" ? "PRIMARY KEY" : "UNIQUE";
-            var indexKind = keyConstraint.IndexTypeDesc.Contains("CLUSTERED", StringComparison.OrdinalIgnoreCase)
-                ? keyConstraint.IndexTypeDesc.Replace('_', ' ')
-                : "NONCLUSTERED";
-
-            sb.AppendLine(
-                $"ALTER TABLE {tableIdentifier} ADD CONSTRAINT {Quote(keyConstraint.Name)} {constraintKind} {indexKind} ({columnsSql});");
-            sb.AppendLine("GO");
-            sb.AppendLine();
-        }
-
-        foreach(var foreignKey in foreignKeys)
-        {
-            var fkColumnsSql = string.Join(", ", foreignKey.Columns.Select(x => Quote(x.ParentColumn)));
-            var refColumnsSql = string.Join(", ", foreignKey.Columns.Select(x => Quote(x.ReferencedColumn)));
-            var withCheck = foreignKey.IsNotTrusted ? "WITH NOCHECK" : "WITH CHECK";
-
-            sb.Append($"ALTER TABLE {tableIdentifier} {withCheck} ADD CONSTRAINT {Quote(foreignKey.Name)}");
-            sb.Append($" FOREIGN KEY ({fkColumnsSql})");
-            sb.Append($" REFERENCES {Quote(foreignKey.ReferencedSchema, foreignKey.ReferencedTable)} ({refColumnsSql})");
-
-            var deleteAction = ToReferentialAction(foreignKey.DeleteActionDesc);
-            var updateAction = ToReferentialAction(foreignKey.UpdateActionDesc);
-            if(deleteAction is not null)
-                sb.Append($" ON DELETE {deleteAction}");
-            if(updateAction is not null)
-                sb.Append($" ON UPDATE {updateAction}");
-            if(foreignKey.IsNotForReplication)
-                sb.Append(" NOT FOR REPLICATION");
-
-            sb.AppendLine(";");
-            sb.AppendLine("GO");
-
-            if(foreignKey.IsDisabled)
-            {
-                sb.AppendLine($"ALTER TABLE {tableIdentifier} NOCHECK CONSTRAINT {Quote(foreignKey.Name)};");
-                sb.AppendLine("GO");
-            }
-
-            sb.AppendLine();
-        }
-
-        foreach(var checkConstraint in checkConstraints)
-        {
-            var withCheck = checkConstraint.IsNotTrusted ? "WITH NOCHECK" : "WITH CHECK";
-            sb.AppendLine(
-                $"ALTER TABLE {tableIdentifier} {withCheck} ADD CONSTRAINT {Quote(checkConstraint.Name)} CHECK {checkConstraint.Definition};");
-            sb.AppendLine("GO");
-
-            if(checkConstraint.IsDisabled)
-            {
-                sb.AppendLine($"ALTER TABLE {tableIdentifier} NOCHECK CONSTRAINT {Quote(checkConstraint.Name)};");
-                sb.AppendLine("GO");
-            }
-
-            sb.AppendLine();
-        }
-
-        foreach(var index in indexes)
-        {
-            var keyColumns = index.Columns.Where(x => !x.IsIncluded).Select(BuildIndexColumnExpression).ToList();
-            var includedColumns = index.Columns.Where(x => x.IsIncluded).Select(x => Quote(x.Name)).ToList();
-
-            sb.Append($"CREATE {(index.IsUnique ? "UNIQUE " : string.Empty)}{index.TypeDesc.Replace('_', ' ')} INDEX {Quote(index.Name)}");
-            sb.Append($" ON {tableIdentifier} ({string.Join(", ", keyColumns)})");
-            if(includedColumns.Count > 0)
-                sb.Append($" INCLUDE ({string.Join(", ", includedColumns)})");
-            if(!string.IsNullOrWhiteSpace(index.FilterDefinition))
-                sb.Append($" WHERE {index.FilterDefinition}");
-            sb.AppendLine(";");
-            sb.AppendLine("GO");
-
-            if(index.IsDisabled)
-            {
-                sb.AppendLine($"ALTER INDEX {Quote(index.Name)} ON {tableIdentifier} DISABLE;");
-                sb.AppendLine("GO");
-            }
-
-            sb.AppendLine();
-        }
-
-        return new TableScriptResult(sb.ToString().TrimEnd(), dependencies);
+            Schema = table.Schema,
+            Name = table.Name,
+            Columns = await GetColumnsAsync(connection, table.ObjectId, cancellationToken),
+            KeyConstraints = await GetKeyConstraintsAsync(connection, table.ObjectId, cancellationToken),
+            ForeignKeys = await GetForeignKeysAsync(connection, table.ObjectId, cancellationToken),
+            CheckConstraints = await GetCheckConstraintsAsync(connection, table.ObjectId, cancellationToken),
+            Indexes = await GetIndexesAsync(connection, table.ObjectId, cancellationToken)
+        };
     }
 
-    private static async Task<List<ColumnInfo>> GetColumnsAsync(SqlConnection connection, int objectId, CancellationToken cancellationToken)
+    private static async Task<List<ColumnModel>> GetColumnsAsync(SqlConnection connection, int objectId, CancellationToken cancellationToken)
     {
         const string sql = """
                            SELECT
@@ -340,7 +242,7 @@ public sealed class SqlServerSchemaExtractor
                            ORDER BY c.column_id;
                            """;
 
-        var result = new List<ColumnInfo>();
+        var result = new List<ColumnModel>();
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         command.Parameters.AddWithValue("@objectId", objectId);
@@ -348,7 +250,7 @@ public sealed class SqlServerSchemaExtractor
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
         {
-            result.Add(new ColumnInfo
+            result.Add(new ColumnModel
             {
                 Name = reader.GetString(1),
                 TypeSchema = reader.GetString(2),
@@ -374,7 +276,7 @@ public sealed class SqlServerSchemaExtractor
         return result;
     }
 
-    private static async Task<List<KeyConstraintInfo>> GetKeyConstraintsAsync(SqlConnection connection, int objectId, CancellationToken cancellationToken)
+    private static async Task<List<KeyConstraintModel>> GetKeyConstraintsAsync(SqlConnection connection, int objectId, CancellationToken cancellationToken)
     {
         const string sql = """
                            SELECT
@@ -390,7 +292,7 @@ public sealed class SqlServerSchemaExtractor
                            ORDER BY CASE WHEN kc.type = 'PK' THEN 0 ELSE 1 END, kc.name;
                            """;
 
-        var constraints = new List<KeyConstraintInfo>();
+        var constraints = new List<(KeyConstraintModel Model, int IndexId)>();
         await using(var command = connection.CreateCommand())
         {
             command.CommandText = sql;
@@ -398,25 +300,29 @@ public sealed class SqlServerSchemaExtractor
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while(await reader.ReadAsync(cancellationToken))
             {
-                constraints.Add(new KeyConstraintInfo(
-                    reader.GetString(0),
-                    reader.GetString(1),
-                    reader.GetInt32(2),
-                    reader.GetString(3),
-                    new List<IndexColumnInfo>()));
+                constraints.Add((
+                    new KeyConstraintModel
+                    {
+                        Name = reader.GetString(0),
+                        TypeCode = reader.GetString(1),
+                        IndexTypeDesc = reader.GetString(3)
+                    },
+                    reader.GetInt32(2)));
             }
         }
 
-        for(var i = 0; i < constraints.Count; i++)
+        var result = new List<KeyConstraintModel>(constraints.Count);
+        foreach(var (model, indexId) in constraints)
         {
-            var columns = await GetIndexColumnsAsync(connection, objectId, constraints[i].IndexId, cancellationToken);
-            constraints[i] = constraints[i] with { Columns = columns.Where(x => !x.IsIncluded).ToList() };
+            var columns = await GetIndexColumnsAsync(connection, objectId, indexId, cancellationToken);
+            model.Columns = columns.Where(x => !x.IsIncluded).ToList();
+            result.Add(model);
         }
 
-        return constraints;
+        return result;
     }
 
-    private static async Task<List<ForeignKeyInfo>> GetForeignKeysAsync(SqlConnection connection, int objectId, CancellationToken cancellationToken)
+    private static async Task<List<ForeignKeyModel>> GetForeignKeysAsync(SqlConnection connection, int objectId, CancellationToken cancellationToken)
     {
         const string sql = """
                            SELECT
@@ -436,7 +342,7 @@ public sealed class SqlServerSchemaExtractor
                            ORDER BY fk.name;
                            """;
 
-        var fks = new List<ForeignKeyInfo>();
+        var fks = new List<(ForeignKeyModel Model, int ObjectId)>();
         await using(var command = connection.CreateCommand())
         {
             command.CommandText = sql;
@@ -444,30 +350,33 @@ public sealed class SqlServerSchemaExtractor
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while(await reader.ReadAsync(cancellationToken))
             {
-                fks.Add(new ForeignKeyInfo(
-                    reader.GetInt32(0),
-                    reader.GetString(1),
-                    reader.GetString(2),
-                    reader.GetString(3),
-                    reader.GetString(4),
-                    reader.GetString(5),
-                    reader.GetBoolean(6),
-                    reader.GetBoolean(7),
-                    reader.GetBoolean(8),
-                    new List<ForeignKeyColumnInfo>()));
+                fks.Add((
+                    new ForeignKeyModel
+                    {
+                        Name = reader.GetString(1),
+                        ReferencedSchema = reader.GetString(2),
+                        ReferencedTable = reader.GetString(3),
+                        DeleteActionDesc = reader.GetString(4),
+                        UpdateActionDesc = reader.GetString(5),
+                        IsNotForReplication = reader.GetBoolean(6),
+                        IsNotTrusted = reader.GetBoolean(7),
+                        IsDisabled = reader.GetBoolean(8)
+                    },
+                    reader.GetInt32(0)));
             }
         }
 
-        for(var i = 0; i < fks.Count; i++)
+        var result = new List<ForeignKeyModel>(fks.Count);
+        foreach(var (model, fkObjectId) in fks)
         {
-            var columns = await GetForeignKeyColumnsAsync(connection, fks[i].ObjectId, cancellationToken);
-            fks[i] = fks[i] with { Columns = columns };
+            model.Columns = await GetForeignKeyColumnsAsync(connection, fkObjectId, cancellationToken);
+            result.Add(model);
         }
 
-        return fks;
+        return result;
     }
 
-    private static async Task<List<ForeignKeyColumnInfo>> GetForeignKeyColumnsAsync(SqlConnection connection, int fkObjectId, CancellationToken cancellationToken)
+    private static async Task<List<ForeignKeyColumnModel>> GetForeignKeyColumnsAsync(SqlConnection connection, int fkObjectId, CancellationToken cancellationToken)
     {
         const string sql = """
                            SELECT
@@ -484,7 +393,7 @@ public sealed class SqlServerSchemaExtractor
                            ORDER BY fkc.constraint_column_id;
                            """;
 
-        var result = new List<ForeignKeyColumnInfo>();
+        var result = new List<ForeignKeyColumnModel>();
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         command.Parameters.AddWithValue("@fkObjectId", fkObjectId);
@@ -492,13 +401,17 @@ public sealed class SqlServerSchemaExtractor
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
         {
-            result.Add(new ForeignKeyColumnInfo(reader.GetString(0), reader.GetString(1)));
+            result.Add(new ForeignKeyColumnModel
+            {
+                ParentColumn = reader.GetString(0),
+                ReferencedColumn = reader.GetString(1)
+            });
         }
 
         return result;
     }
 
-    private static async Task<List<CheckConstraintInfo>> GetCheckConstraintsAsync(SqlConnection connection, int objectId, CancellationToken cancellationToken)
+    private static async Task<List<CheckConstraintModel>> GetCheckConstraintsAsync(SqlConnection connection, int objectId, CancellationToken cancellationToken)
     {
         const string sql = """
                            SELECT
@@ -511,7 +424,7 @@ public sealed class SqlServerSchemaExtractor
                            ORDER BY cc.name;
                            """;
 
-        var result = new List<CheckConstraintInfo>();
+        var result = new List<CheckConstraintModel>();
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         command.Parameters.AddWithValue("@objectId", objectId);
@@ -519,17 +432,19 @@ public sealed class SqlServerSchemaExtractor
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
         {
-            result.Add(new CheckConstraintInfo(
-                reader.GetString(0),
-                reader.GetString(1),
-                reader.GetBoolean(2),
-                reader.GetBoolean(3)));
+            result.Add(new CheckConstraintModel
+            {
+                Name = reader.GetString(0),
+                Definition = reader.GetString(1),
+                IsNotTrusted = reader.GetBoolean(2),
+                IsDisabled = reader.GetBoolean(3)
+            });
         }
 
         return result;
     }
 
-    private static async Task<List<IndexInfo>> GetIndexesAsync(SqlConnection connection, int objectId, CancellationToken cancellationToken)
+    private static async Task<List<IndexModel>> GetIndexesAsync(SqlConnection connection, int objectId, CancellationToken cancellationToken)
     {
         const string sql = """
                            SELECT
@@ -549,7 +464,7 @@ public sealed class SqlServerSchemaExtractor
                            ORDER BY i.name;
                            """;
 
-        var indexes = new List<IndexInfo>();
+        var indexes = new List<(IndexModel Model, int IndexId)>();
         await using(var command = connection.CreateCommand())
         {
             command.CommandText = sql;
@@ -557,27 +472,30 @@ public sealed class SqlServerSchemaExtractor
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while(await reader.ReadAsync(cancellationToken))
             {
-                indexes.Add(new IndexInfo(
-                    reader.GetInt32(0),
-                    reader.GetString(1),
-                    reader.GetBoolean(2),
-                    reader.GetString(3),
-                    reader.IsDBNull(4) ? null : reader.GetString(4),
-                    reader.GetBoolean(5),
-                    new List<IndexColumnInfo>()));
+                indexes.Add((
+                    new IndexModel
+                    {
+                        Name = reader.GetString(1),
+                        IsUnique = reader.GetBoolean(2),
+                        TypeDesc = reader.GetString(3),
+                        FilterDefinition = reader.IsDBNull(4) ? null : reader.GetString(4),
+                        IsDisabled = reader.GetBoolean(5)
+                    },
+                    reader.GetInt32(0)));
             }
         }
 
-        for(var i = 0; i < indexes.Count; i++)
+        var result = new List<IndexModel>(indexes.Count);
+        foreach(var (model, indexId) in indexes)
         {
-            var columns = await GetIndexColumnsAsync(connection, objectId, indexes[i].IndexId, cancellationToken);
-            indexes[i] = indexes[i] with { Columns = columns };
+            model.Columns = await GetIndexColumnsAsync(connection, objectId, indexId, cancellationToken);
+            result.Add(model);
         }
 
-        return indexes;
+        return result;
     }
 
-    private static async Task<List<IndexColumnInfo>> GetIndexColumnsAsync(SqlConnection connection, int objectId, int indexId, CancellationToken cancellationToken)
+    private static async Task<List<IndexColumnModel>> GetIndexColumnsAsync(SqlConnection connection, int objectId, int indexId, CancellationToken cancellationToken)
     {
         const string sql = """
                            SELECT
@@ -595,7 +513,7 @@ public sealed class SqlServerSchemaExtractor
                            ORDER BY ic.is_included_column, ic.key_ordinal, ic.index_column_id;
                            """;
 
-        var result = new List<IndexColumnInfo>();
+        var result = new List<IndexColumnModel>();
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         command.Parameters.AddWithValue("@objectId", objectId);
@@ -604,99 +522,20 @@ public sealed class SqlServerSchemaExtractor
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
         {
-            result.Add(new IndexColumnInfo(
-                reader.GetString(0),
-                reader.GetByte(1),
-                reader.GetBoolean(2),
-                reader.GetBoolean(3),
-                reader.GetInt32(4)));
+            result.Add(new IndexColumnModel
+            {
+                Name = reader.GetString(0),
+                KeyOrdinal = reader.GetByte(1),
+                IsDescending = reader.GetBoolean(2),
+                IsIncluded = reader.GetBoolean(3),
+                IndexColumnId = reader.GetInt32(4)
+            });
         }
 
         return result;
     }
 
-    private static string BuildColumnDefinition(ColumnInfo column)
-    {
-        if(column.IsComputed)
-        {
-            var persisted = column.IsPersisted ? " PERSISTED" : string.Empty;
-            return $"{Quote(column.Name)} AS {column.ComputedDefinition}{persisted}";
-        }
-
-        var sb = new StringBuilder();
-        sb.Append(Quote(column.Name));
-        sb.Append(' ');
-        sb.Append(BuildType(column));
-
-        if(!string.IsNullOrWhiteSpace(column.CollationName))
-            sb.Append($" COLLATE {column.CollationName}");
-
-        if(column.IsIdentity)
-        {
-            var seed = string.IsNullOrWhiteSpace(column.IdentitySeed) ? "1" : column.IdentitySeed;
-            var increment = string.IsNullOrWhiteSpace(column.IdentityIncrement) ? "1" : column.IdentityIncrement;
-            sb.Append($" IDENTITY({seed},{increment})");
-        }
-
-        if(column.IsRowGuid)
-            sb.Append(" ROWGUIDCOL");
-
-        sb.Append(column.IsNullable ? " NULL" : " NOT NULL");
-
-        if(!string.IsNullOrWhiteSpace(column.DefaultDefinition))
-        {
-            if(!string.IsNullOrWhiteSpace(column.DefaultName))
-                sb.Append($" CONSTRAINT {Quote(column.DefaultName)}");
-            sb.Append($" DEFAULT {column.DefaultDefinition}");
-        }
-
-        return sb.ToString();
-    }
-
-    private static string BuildType(ColumnInfo column)
-    {
-        if(column.IsUserDefinedType)
-            return $"{Quote(column.TypeSchema)}.{Quote(column.TypeName)}";
-
-        var name = column.TypeName;
-        return name.ToLowerInvariant() switch
-        {
-            "varchar" or "char" or "varbinary" or "binary" =>
-                $"{name}({(column.MaxLength == -1 ? "MAX" : column.MaxLength.ToString())})",
-            "nvarchar" or "nchar" =>
-                $"{name}({(column.MaxLength == -1 ? "MAX" : (column.MaxLength / 2).ToString())})",
-            "decimal" or "numeric" =>
-                $"{name}({column.Precision},{column.Scale})",
-            "datetime2" or "datetimeoffset" or "time" =>
-                $"{name}({column.Scale})",
-            "float" when column.Precision != 53 =>
-                $"{name}({column.Precision})",
-            _ => name
-        };
-    }
-
-    private static string BuildIndexColumnExpression(IndexColumnInfo column)
-    {
-        if(column.IsIncluded)
-            return Quote(column.Name);
-
-        return $"{Quote(column.Name)} {(column.IsDescending ? "DESC" : "ASC")}";
-    }
-
-    private static string? ToReferentialAction(string action) => action.ToUpperInvariant() switch
-    {
-        "NO_ACTION" => null,
-        "CASCADE" => "CASCADE",
-        "SET_NULL" => "SET NULL",
-        "SET_DEFAULT" => "SET DEFAULT",
-        _ => null
-    };
-
     private static string BuildKey(DbObjectType type, string schema, string name) => $"{type}:{schema}.{name}";
-
-    private static string Quote(string name) => $"[{name.Replace("]", "]]")}]";
-
-    private static string Quote(string schema, string name) => $"{Quote(schema)}.{Quote(name)}";
 
     private static async Task<object?> ExecuteScalarAsync(SqlConnection connection, string sql, CancellationToken cancellationToken)
     {
@@ -706,67 +545,4 @@ public sealed class SqlServerSchemaExtractor
     }
 
     private sealed record TableInfo(int ObjectId, string Schema, string Name);
-
-    private sealed record TableScriptResult(string Script, List<string> Dependencies);
-
-    private sealed class ColumnInfo
-    {
-        public string Name { get; init; } = string.Empty;
-        public string TypeSchema { get; init; } = string.Empty;
-        public string TypeName { get; init; } = string.Empty;
-        public bool IsUserDefinedType { get; init; }
-        public short MaxLength { get; init; }
-        public byte Precision { get; init; }
-        public byte Scale { get; init; }
-        public bool IsNullable { get; init; }
-        public bool IsIdentity { get; init; }
-        public bool IsComputed { get; init; }
-        public string? CollationName { get; init; }
-        public bool IsRowGuid { get; init; }
-        public string? ComputedDefinition { get; init; }
-        public bool IsPersisted { get; init; }
-        public string? DefaultName { get; init; }
-        public string? DefaultDefinition { get; init; }
-        public string? IdentitySeed { get; init; }
-        public string? IdentityIncrement { get; init; }
-    }
-
-    private sealed record KeyConstraintInfo(
-        string Name,
-        string TypeCode,
-        int IndexId,
-        string IndexTypeDesc,
-        List<IndexColumnInfo> Columns);
-
-    private sealed record ForeignKeyInfo(
-        int ObjectId,
-        string Name,
-        string ReferencedSchema,
-        string ReferencedTable,
-        string DeleteActionDesc,
-        string UpdateActionDesc,
-        bool IsNotForReplication,
-        bool IsNotTrusted,
-        bool IsDisabled,
-        List<ForeignKeyColumnInfo> Columns);
-
-    private sealed record ForeignKeyColumnInfo(string ParentColumn, string ReferencedColumn);
-
-    private sealed record CheckConstraintInfo(string Name, string Definition, bool IsNotTrusted, bool IsDisabled);
-
-    private sealed record IndexInfo(
-        int IndexId,
-        string Name,
-        bool IsUnique,
-        string TypeDesc,
-        string? FilterDefinition,
-        bool IsDisabled,
-        List<IndexColumnInfo> Columns);
-
-    private sealed record IndexColumnInfo(
-        string Name,
-        byte KeyOrdinal,
-        bool IsDescending,
-        bool IsIncluded,
-        int IndexColumnId);
 }

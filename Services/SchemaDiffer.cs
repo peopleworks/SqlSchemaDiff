@@ -24,6 +24,8 @@ public sealed class SchemaDiffer
         var deferredCreates = new List<PendingCreate>();
         var createInfoStatements = new List<string>();
         var dropStatements = new List<string>();
+        var alterStatements = new List<string>();
+        var tableDiffer = new TableDiffer();
 
         foreach(var sourceObject in source.Objects.OrderBy(GetCreateOrder).ThenBy(x => x.Key, StringComparer.OrdinalIgnoreCase))
         {
@@ -53,8 +55,16 @@ public sealed class SchemaDiffer
                     dropStatements.Add(BuildDropStatement(sourceObject, includeIfExists: true));
                     deferredCreates.Add(new PendingCreate(sourceObject, EnsureTrailingGo(sourceObject.Definition)));
                 }
+                else if(sourceObject.Table is not null && targetObject.Table is not null)
+                {
+                    // Column-level sync: emit incremental ALTERs that preserve data.
+                    var alter = tableDiffer.Diff(sourceObject.Table, targetObject.Table, includeDrops);
+                    if(alter.HasChanges || alter.WarningCount > 0)
+                        alterStatements.Add(alter.Script);
+                }
                 else
                 {
+                    // No structured model available (e.g. legacy snapshot): fall back to skip.
                     skipped++;
                     createInfoStatements.Add($"-- WARNING: table changed and was skipped: {sourceObject.Identifier}");
                     createInfoStatements.Add("-- Use --allow-table-rebuild to generate DROP/CREATE (can cause data loss).");
@@ -97,6 +107,7 @@ public sealed class SchemaDiffer
         var createStatements = new List<string>();
         createStatements.AddRange(createInfoStatements);
         createStatements.AddRange(OrderCreateStatementsByDependencies(deferredCreates));
+        createStatements.AddRange(alterStatements);
 
         var script = ComposeScript(source, target, createStatements, dropStatements);
         return new DiffResult
