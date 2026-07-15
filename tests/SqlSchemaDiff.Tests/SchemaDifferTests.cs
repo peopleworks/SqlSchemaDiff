@@ -53,6 +53,42 @@ public class SchemaDifferTests
     }
 
     [Fact]
+    public void ProgrammableCreate_IsIsolatedFromComments()
+    {
+        // Regression guard: a CREATE VIEW/PROC/FUNCTION must be in its own batch with
+        // no leading comment, or SQL Server bakes the comment into sys.sql_modules and
+        // the object diffs forever.
+        var view = new DbSchemaObject
+        {
+            Type = DbObjectType.View,
+            Schema = "dbo",
+            Name = "vTest",
+            Definition = "CREATE VIEW dbo.vTest AS SELECT 1 AS X"
+        };
+        var source = Snapshot("Src", view);
+        var target = Snapshot("Tgt");
+
+        var result = _differ.Diff(source, target, includeDrops: false, includeTableDrops: false, allowTableRebuild: false, addOnly: false);
+
+        var batches = SqlBatchExecutor.SplitBatches(result.Script);
+        var createBatch = batches.Single(b => b.Contains("CREATE VIEW", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain("--", createBatch);
+    }
+
+    [Fact]
+    public void DiffResult_ReportsChangedObjectNames()
+    {
+        var source = Snapshot("Src",
+            TableObject(Table("Employee", Col("Id", nullable: false), NVarchar("Email", 256)), "def-source"));
+        var target = Snapshot("Tgt",
+            TableObject(Table("Employee", Col("Id", nullable: false)), "def-target"));
+
+        var result = _differ.Diff(source, target, includeDrops: false, includeTableDrops: false, allowTableRebuild: false, addOnly: false);
+
+        Assert.Contains("[dbo].[Employee]", result.ChangedObjects);
+    }
+
+    [Fact]
     public void LegacySnapshotWithoutModel_FallsBackToSkip()
     {
         // Table objects without a structured Table model (Table == null) but different definitions.

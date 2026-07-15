@@ -21,6 +21,9 @@ public sealed class SchemaDiffer
         var changed = 0;
         var removed = 0;
         var skipped = 0;
+        var addedObjects = new List<string>();
+        var changedObjects = new List<string>();
+        var removedObjects = new List<string>();
         var deferredCreates = new List<PendingCreate>();
         var createInfoStatements = new List<string>();
         var dropStatements = new List<string>();
@@ -33,6 +36,7 @@ public sealed class SchemaDiffer
             {
                 deferredCreates.Add(new PendingCreate(sourceObject, EnsureTrailingGo(sourceObject.Definition)));
                 added++;
+                addedObjects.Add(sourceObject.Identifier);
                 continue;
             }
 
@@ -42,6 +46,7 @@ public sealed class SchemaDiffer
                 continue;
 
             changed++;
+            changedObjects.Add(sourceObject.Identifier);
             if(addOnly)
             {
                 skipped++;
@@ -95,6 +100,7 @@ public sealed class SchemaDiffer
 
                 dropStatements.Add(BuildDropStatement(targetObject, includeIfExists: true));
                 removed++;
+                removedObjects.Add(targetObject.Identifier);
             }
         }
         else if(includeDrops && addOnly)
@@ -116,7 +122,10 @@ public sealed class SchemaDiffer
             Added = added,
             Changed = changed,
             Removed = removed,
-            Skipped = skipped
+            Skipped = skipped,
+            AddedObjects = addedObjects,
+            ChangedObjects = changedObjects,
+            RemovedObjects = removedObjects
         };
     }
 
@@ -135,19 +144,43 @@ public sealed class SchemaDiffer
         if(drops.Count > 0)
         {
             sb.AppendLine("-- Drops");
+            sb.AppendLine("GO");
             foreach(var statement in drops)
-                sb.AppendLine(statement);
+                AppendBatch(sb, statement);
             sb.AppendLine();
         }
 
         if(creates.Count > 0)
         {
             sb.AppendLine("-- Creates/Alters");
+            sb.AppendLine("GO");
             foreach(var statement in creates)
-                sb.AppendLine(statement);
+                AppendBatch(sb, statement);
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Appends a statement block and guarantees it ends on its own <c>GO</c> so it
+    /// executes as an isolated batch. This is critical for CREATE VIEW/PROCEDURE/
+    /// FUNCTION: SQL Server stores the entire batch text as the object definition,
+    /// so any preceding comment would be baked into sys.sql_modules and cause the
+    /// object to diff forever. Isolating each batch keeps definitions clean.
+    /// </summary>
+    private static void AppendBatch(StringBuilder sb, string block)
+    {
+        if(string.IsNullOrWhiteSpace(block))
+        {
+            sb.AppendLine();
+            return;
+        }
+
+        sb.AppendLine(block);
+
+        var lastLine = block.Replace("\r\n", "\n").TrimEnd().Split('\n').Last().Trim();
+        if(!string.Equals(lastLine, "GO", StringComparison.OrdinalIgnoreCase))
+            sb.AppendLine("GO");
     }
 
     private static List<string> OrderCreateStatementsByDependencies(List<PendingCreate> pendingCreates)

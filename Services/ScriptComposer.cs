@@ -21,7 +21,10 @@ public static class ScriptComposer
 
         foreach(var schemaObject in orderedObjects)
         {
+            // GO after the comment so it is not stored as part of a
+            // CREATE VIEW/PROCEDURE/FUNCTION definition in sys.sql_modules.
             sb.AppendLine($"-- {schemaObject.Type} {schemaObject.Identifier}");
+            sb.AppendLine("GO");
             sb.AppendLine(EnsureTrailingGo(schemaObject.Definition));
             sb.AppendLine();
         }
