@@ -17,4 +17,8 @@
     <None Remove="tests/**/*" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="SqlSchemaDiff.Tests" />
+  </ItemGroup>
+
 </Project>
