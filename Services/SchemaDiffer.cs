@@ -40,6 +40,33 @@ public sealed class SchemaDiffer
                 continue;
             }
 
+            // Tables with structured models on both sides: decide "changed" by the actual
+            // structural diff, not by text. This way cosmetic-only differences (e.g. the
+            // same columns in a different physical order) are NOT reported as drift, since
+            // reordering columns would require a destructive table rebuild.
+            if(sourceObject.Type == DbObjectType.Table
+                && !allowTableRebuild
+                && sourceObject.Table is not null
+                && targetObject.Table is not null)
+            {
+                var alter = tableDiffer.Diff(sourceObject.Table, targetObject.Table, includeDrops);
+                if(!alter.HasChanges && alter.WarningCount == 0)
+                    continue; // structurally identical; ignore cosmetic text differences
+
+                changed++;
+                changedObjects.Add(sourceObject.Identifier);
+                if(addOnly)
+                {
+                    skipped++;
+                    continue;
+                }
+
+                alterStatements.Add(alter.Script);
+                continue;
+            }
+
+            // Programmable objects, table rebuilds, and legacy tables without a structured
+            // model fall back to normalized-text comparison.
             var sourceNormalized = SchemaTextNormalizer.Normalize(sourceObject.Definition);
             var targetNormalized = SchemaTextNormalizer.Normalize(targetObject.Definition);
             if(string.Equals(sourceNormalized, targetNormalized, StringComparison.Ordinal))
@@ -59,13 +86,6 @@ public sealed class SchemaDiffer
                 {
                     dropStatements.Add(BuildDropStatement(sourceObject, includeIfExists: true));
                     deferredCreates.Add(new PendingCreate(sourceObject, EnsureTrailingGo(sourceObject.Definition)));
-                }
-                else if(sourceObject.Table is not null && targetObject.Table is not null)
-                {
-                    // Column-level sync: emit incremental ALTERs that preserve data.
-                    var alter = tableDiffer.Diff(sourceObject.Table, targetObject.Table, includeDrops);
-                    if(alter.HasChanges || alter.WarningCount > 0)
-                        alterStatements.Add(alter.Script);
                 }
                 else
                 {

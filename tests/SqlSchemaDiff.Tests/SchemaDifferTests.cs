@@ -76,6 +76,21 @@ public class SchemaDifferTests
     }
 
     [Fact]
+    public void ColumnOrderOnlyDifference_IsNotReportedAsChanged()
+    {
+        // Same columns, different physical order → structurally identical → not drift.
+        var source = Snapshot("Src",
+            TableObject(Table("T", Col("A", nullable: false), Col("B"), Col("C")), "def-a"));
+        var target = Snapshot("Tgt",
+            TableObject(Table("T", Col("B"), Col("A", nullable: false), Col("C")), "def-b"));
+
+        var result = _differ.Diff(source, target, includeDrops: false, includeTableDrops: false, allowTableRebuild: false, addOnly: false);
+
+        Assert.Equal(0, result.Changed);
+        Assert.Empty(result.ChangedObjects);
+    }
+
+    [Fact]
     public void DiffResult_ReportsChangedObjectNames()
     {
         var source = Snapshot("Src",

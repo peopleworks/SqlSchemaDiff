@@ -21,6 +21,12 @@
   is now isolated in its own batch (a `GO` separates comments), keeping definitions clean.
   The next apply self-heals already-polluted objects.
 
+- Column-order-only differences are no longer reported as drift. Tables with a
+  structured model are now compared **structurally** (columns/constraints/indexes by
+  name) instead of by rendered text, so the same columns in a different physical order
+  no longer show as `changed` forever (reordering would require a destructive rebuild).
+  `drift` now converges to 0 for structurally-identical tables.
+
 ### Reporting
 - `diff` / `drift` / `sync` now print the identifiers of added, changed and removed
   objects (not just counts), so it is clear exactly what differs.
