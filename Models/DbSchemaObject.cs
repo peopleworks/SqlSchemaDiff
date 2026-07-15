@@ -15,6 +15,12 @@ public sealed class DbSchemaObject
 
     public List<string> Dependencies { get; init; } = new();
 
+    /// <summary>
+    /// Structured table metadata. Populated only for <see cref="DbObjectType.Table"/>;
+    /// null for programmable objects. Enables column-level ALTER diffing.
+    /// </summary>
+    public TableModel? Table { get; init; }
+
     [JsonIgnore]
     public string Identifier => $"[{Schema}].[{Name}]";
 

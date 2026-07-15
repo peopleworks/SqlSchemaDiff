@@ -72,7 +72,30 @@ sequenceDiagram
 - Stored procedures
 - Functions (scalar + table-valued)
 
-## 4.1) Dependency-Aware Ordering
+## 4.1) Column-Level Table Sync (data-preserving)
+
+When a table exists on **both** source and target but differs, SQLDiff now emits
+incremental `ALTER TABLE` statements instead of skipping the table or dropping it:
+
+- `ALTER TABLE ... ADD` for new columns (inline default carried over).
+- `ALTER TABLE ... ALTER COLUMN` for type / nullability / collation changes.
+- `ADD` / `DROP CONSTRAINT` for changed defaults, PK/UQ, CHECK and foreign keys.
+- `CREATE` / `DROP INDEX` for index changes.
+
+This **preserves existing data**. Destructive operations (dropping target-only
+columns/constraints/indexes) are gated behind `--include-drops`. Risky changes are
+annotated with `-- WARNING:` comments in the script, for example:
+
+- Adding a `NOT NULL` column without a default to a populated table.
+- Turning an existing column `NOT NULL` when it may contain `NULL`s.
+- Narrowing a column type (possible truncation).
+- Identity changes that `ALTER COLUMN` cannot perform (manual rebuild required).
+
+Use `--allow-table-rebuild` only when you explicitly want a full `DROP`/`CREATE`
+(this can cause data loss). Legacy snapshots without structured table metadata fall
+back to the previous skip-with-warning behavior.
+
+## 4.1.1) Dependency-Aware Ordering
 
 When generating diff/sync scripts, SQLDiff now orders create/alter statements using dependency analysis:
 - Table dependencies from foreign keys.
@@ -283,6 +306,11 @@ Correct:
 ```powershell
 SqlSchemaDiff.exe extract --conn "..." --out publish.sql
 ```
+
+### A changed table is skipped instead of synced
+Cause: an old snapshot JSON (pre column-level sync) has no structured table metadata.
+Fix: re-extract the source with the current version so the snapshot includes the
+`Table` model, then re-run `diff`/`deploy`. Live connections always use the new path.
 
 ### Error: `There is already an object named 'X' in the database`
 Cause: applying a full extract script (`publish.sql`) on a DB that already has objects.
