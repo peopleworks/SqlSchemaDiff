@@ -1,5 +1,4 @@
 using System.Text;
-using System.Text.RegularExpressions;
 using SqlSchemaDiff.Models;
 
 namespace SqlSchemaDiff.Services;
@@ -28,6 +27,7 @@ public sealed class SchemaDiffer
         var createInfoStatements = new List<string>();
         var dropStatements = new List<string>();
         var alterStatements = new List<string>();
+        var emittedObjects = new List<DbSchemaObject>();
         var tableDiffer = new TableDiffer();
 
         foreach(var sourceObject in source.Objects.OrderBy(GetCreateOrder).ThenBy(x => x.Key, StringComparer.OrdinalIgnoreCase))
@@ -35,6 +35,7 @@ public sealed class SchemaDiffer
             if(!targetByKey.TryGetValue(sourceObject.Key, out var targetObject))
             {
                 deferredCreates.Add(new PendingCreate(sourceObject, EnsureTrailingGo(sourceObject.Definition)));
+                emittedObjects.Add(sourceObject);
                 added++;
                 addedObjects.Add(sourceObject.Identifier);
                 continue;
@@ -62,6 +63,7 @@ public sealed class SchemaDiffer
                 }
 
                 alterStatements.Add(alter.Script);
+                emittedObjects.Add(sourceObject);
                 continue;
             }
 
@@ -86,6 +88,7 @@ public sealed class SchemaDiffer
                 {
                     dropStatements.Add(BuildDropStatement(sourceObject, includeIfExists: true));
                     deferredCreates.Add(new PendingCreate(sourceObject, EnsureTrailingGo(sourceObject.Definition)));
+                    emittedObjects.Add(sourceObject);
                 }
                 else
                 {
@@ -100,6 +103,7 @@ public sealed class SchemaDiffer
             }
 
             deferredCreates.Add(new PendingCreate(sourceObject, EnsureTrailingGo(ToCreateOrAlter(sourceObject))));
+            emittedObjects.Add(sourceObject);
         }
 
         if(includeDrops && !addOnly)
@@ -135,7 +139,8 @@ public sealed class SchemaDiffer
         createStatements.AddRange(OrderCreateStatementsByDependencies(deferredCreates));
         createStatements.AddRange(alterStatements);
 
-        var script = ComposeScript(source, target, createStatements, dropStatements);
+        var prerequisites = BuildPrerequisites(source, emittedObjects);
+        var script = ComposeScript(source, target, prerequisites, createStatements, dropStatements);
         return new DiffResult
         {
             Script = script,
@@ -149,9 +154,42 @@ public sealed class SchemaDiffer
         };
     }
 
+    /// <summary>
+    /// Schemas and alias types the emitted objects depend on. A table in a schema
+    /// the target does not have, or typed with an alias type it does not know,
+    /// cannot be created at all — so these go out first, each guarded so the script
+    /// stays re-runnable.
+    /// </summary>
+    private static List<string> BuildPrerequisites(DatabaseSnapshot source, List<DbSchemaObject> emitted)
+    {
+        if(emitted.Count == 0)
+            return new List<string>();
+
+        var usedTypes = source.Types
+            .Where(type => emitted.Any(o => o.Table is not null && o.Table.Columns.Any(column =>
+                column.IsUserDefinedType &&
+                string.Equals(column.TypeSchema, type.Schema, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(column.TypeName, type.Name, StringComparison.OrdinalIgnoreCase))))
+            .OrderBy(x => x.Schema, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var schemas = emitted.Select(x => x.Schema)
+            .Concat(usedTypes.Select(x => x.Schema))
+            .Where(x => !string.IsNullOrWhiteSpace(x) && !string.Equals(x, "dbo", StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase);
+
+        var statements = new List<string>();
+        statements.AddRange(schemas.Select(SqlRender.BuildSchemaCreate));
+        statements.AddRange(usedTypes.Select(SqlRender.BuildAliasTypeCreate));
+        return statements;
+    }
+
     private static string ComposeScript(
         DatabaseSnapshot source,
         DatabaseSnapshot target,
+        List<string> prerequisites,
         List<string> creates,
         List<string> drops)
     {
@@ -160,6 +198,18 @@ public sealed class SchemaDiffer
         sb.AppendLine($"-- SQLDiff target: [{target.DatabaseName}]");
         sb.AppendLine($"-- Generated (UTC): {DateTimeOffset.UtcNow:yyyy-MM-dd HH:mm:ss}");
         sb.AppendLine();
+        sb.AppendLine(SqlRender.SessionOptionsPreamble);
+        sb.AppendLine("GO");
+        sb.AppendLine();
+
+        if(prerequisites.Count > 0)
+        {
+            sb.AppendLine("-- Prerequisites (schemas and user-defined types)");
+            sb.AppendLine("GO");
+            foreach(var statement in prerequisites)
+                AppendBatch(sb, statement);
+            sb.AppendLine();
+        }
 
         if(drops.Count > 0)
         {
@@ -312,12 +362,7 @@ public sealed class SchemaDiffer
         if(schemaObject.Type is not (DbObjectType.Function or DbObjectType.StoredProcedure or DbObjectType.View))
             return schemaObject.Definition;
 
-        var definition = schemaObject.Definition.TrimStart();
-        return Regex.Replace(
-            definition,
-            @"^\s*CREATE\s+",
-            "CREATE OR ALTER ",
-            RegexOptions.IgnoreCase);
+        return SqlModuleRewriter.ToCreateOrAlter(schemaObject.Definition);
     }
 
     private static string BuildDropStatement(DbSchemaObject schemaObject, bool includeIfExists)

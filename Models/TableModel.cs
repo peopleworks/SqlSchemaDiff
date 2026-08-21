@@ -34,6 +34,8 @@ public sealed class ColumnModel
     public bool IsPersisted { get; set; }
     public string? DefaultName { get; set; }
     public string? DefaultDefinition { get; set; }
+    /// <summary>True when SQL Server generated the default constraint name (e.g. <c>DF__Orders__Total__5629CD9C</c>).</summary>
+    public bool DefaultIsSystemNamed { get; set; }
     public string? IdentitySeed { get; set; }
     public string? IdentityIncrement { get; set; }
 }
@@ -43,6 +45,8 @@ public sealed class KeyConstraintModel
     /// <summary>"PK" or "UQ".</summary>
     public string TypeCode { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
+    /// <summary>True when SQL Server generated the name; such constraints are matched by shape, not by name.</summary>
+    public bool IsSystemNamed { get; set; }
     public string IndexTypeDesc { get; set; } = string.Empty;
     public List<IndexColumnModel> Columns { get; set; } = new();
 }
@@ -50,6 +54,8 @@ public sealed class KeyConstraintModel
 public sealed class ForeignKeyModel
 {
     public string Name { get; set; } = string.Empty;
+    /// <summary>True when SQL Server generated the name; such constraints are matched by shape, not by name.</summary>
+    public bool IsSystemNamed { get; set; }
     public string ReferencedSchema { get; set; } = string.Empty;
     public string ReferencedTable { get; set; } = string.Empty;
     public string DeleteActionDesc { get; set; } = string.Empty;
@@ -69,6 +75,8 @@ public sealed class ForeignKeyColumnModel
 public sealed class CheckConstraintModel
 {
     public string Name { get; set; } = string.Empty;
+    /// <summary>True when SQL Server generated the name; such constraints are matched by shape, not by name.</summary>
+    public bool IsSystemNamed { get; set; }
     public string Definition { get; set; } = string.Empty;
     public bool IsNotTrusted { get; set; }
     public bool IsDisabled { get; set; }

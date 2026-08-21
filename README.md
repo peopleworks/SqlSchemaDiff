@@ -1,414 +1,414 @@
-# SQLDiff CLI (.NET 9)
+# 🔀 SQLDiff
 
-SQLDiff is a SQL Server schema synchronization CLI.
+[![CI](https://github.com/peopleworks/SqlSchemaDiff/actions/workflows/ci.yml/badge.svg)](https://github.com/peopleworks/SqlSchemaDiff/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/peopleworks/SqlSchemaDiff?color=blue)](LICENSE)
+[![.NET 9](https://img.shields.io/badge/.NET-9-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
+[![SQL Server 2016+](https://img.shields.io/badge/SQL%20Server-2016%2B-CC2927?logo=microsoftsqlserver&logoColor=white)](https://www.microsoft.com/sql-server)
+[![Latest release](https://img.shields.io/github/v/release/peopleworks/SqlSchemaDiff?label=release&logo=github)](https://github.com/peopleworks/SqlSchemaDiff/releases)
+[![GitHub stars](https://img.shields.io/github/stars/peopleworks/SqlSchemaDiff?style=social)](https://github.com/peopleworks/SqlSchemaDiff/stargazers)
 
-Created by PeopleWorks using Codex.
+**Compare two SQL Server databases and generate the migration script that makes one
+match the other — without dropping your tables.**
 
-Primary goals:
-- Extract schema from a source database.
-- Compare source vs target.
-- Generate safe migration SQL.
-- Apply only what is needed on target.
+No SSDT project, no `.dacpac`, no SSMS, no license server. One command-line binary that
+reads schema metadata, works out the difference, and writes T-SQL you can read before
+you run it.
 
-This README is **EXE-first** for client/server operations.
-
-## What's new (v1.1 – v1.2)
-
-- **Column-level table sync** — changed tables are updated with incremental
-  `ALTER TABLE` statements that **preserve data**, instead of being skipped or rebuilt.
-- **Transactional apply** — `apply`/`sync`/`deploy` run in one transaction and roll back
-  atomically on failure (`--no-transaction` to opt out); optional `--log` audit trail.
-- **Object-level reporting** — `diff`/`drift`/`sync` print the names of added, changed
-  and removed objects, not just counts.
-- **Structural table comparison** — tables are compared by structure (columns,
-  constraints, indexes), so cosmetic-only differences such as column ordering are **not**
-  reported as drift.
-- **Fixes** — space-padded object type codes (`U`), and comments being baked into
-  view/procedure/function definitions (which caused permanent drift). See `RELEASE_NOTES.md`.
-
-## 1) Quick Start (EXE)
-
-Assumption: you are in the folder where `SqlSchemaDiff.exe` is located.
-
-```powershell
-.\SqlSchemaDiff.exe --help
+```bash
+sqldiff deploy --source-conn "Server=dev;Database=App;..." \
+               --target-conn "Server=prod;Database=App;..." \
+               --out changes.sql
 ```
 
-Important command syntax:
-- Correct: `SqlSchemaDiff.exe extract ...`
-- Incorrect: `SqlSchemaDiff.exe -- extract ...`
-
-## 2) Architecture (Mermaid)
-
-```mermaid
-flowchart LR
-    A[Source SQL Server] -->|extract| B[Source Snapshot]
-    C[Target SQL Server] -->|extract| D[Target Snapshot]
-    B --> E[SchemaDiffer]
-    D --> E
-    E --> F[Diff SQL Script]
-    F -->|apply| C
-```
-
-## 3) Operation Flow (Mermaid)
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant CLI as SqlSchemaDiff.exe
-    participant SRC as Source DB
-    participant TGT as Target DB
-
-    U->>CLI: check-conn
-    CLI->>SRC: Open + metadata query
-    CLI->>TGT: Open + metadata query
-    CLI-->>U: Connection OK / Error
-
-    U->>CLI: diff or sync
-    CLI->>SRC: Extract schema
-    CLI->>TGT: Extract schema
-    CLI-->>U: diff.sql
-
-    U->>CLI: apply --script diff.sql
-    CLI->>TGT: Execute SQL batches
-    CLI-->>U: Applied / Error
-```
-
-## 4) Supported Schema Objects
-
-- Tables
-  - Columns (identity, computed, defaults, collation, nullable)
-  - PK / UQ
-  - FK
-  - CHECK
-  - Indexes
-- Views
-- Stored procedures
-- Functions (scalar + table-valued)
-
-## 4.1) Column-Level Table Sync (data-preserving)
-
-When a table exists on **both** source and target but differs, SQLDiff now emits
-incremental `ALTER TABLE` statements instead of skipping the table or dropping it:
-
-- `ALTER TABLE ... ADD` for new columns (inline default carried over).
-- `ALTER TABLE ... ALTER COLUMN` for type / nullability / collation changes.
-- `ADD` / `DROP CONSTRAINT` for changed defaults, PK/UQ, CHECK and foreign keys.
-- `CREATE` / `DROP INDEX` for index changes.
-
-This **preserves existing data**. Destructive operations (dropping target-only
-columns/constraints/indexes) are gated behind `--include-drops`. Risky changes are
-annotated with `-- WARNING:` comments in the script, for example:
-
-- Adding a `NOT NULL` column without a default to a populated table.
-- Turning an existing column `NOT NULL` when it may contain `NULL`s.
-- Narrowing a column type (possible truncation).
-- Identity changes that `ALTER COLUMN` cannot perform (manual rebuild required).
-
-Use `--allow-table-rebuild` only when you explicitly want a full `DROP`/`CREATE`
-(this can cause data loss). Legacy snapshots without structured table metadata fall
-back to the previous skip-with-warning behavior.
-
-## 4.1.2) Structural Comparison (column order is not drift)
-
-Tables with structured metadata are compared **structurally** — columns, constraints and
-indexes matched by name — not by comparing the rendered `CREATE TABLE` text. This means:
-
-- The **same columns in a different physical order** are treated as equal (reordering a
-  column would require a destructive rebuild, so it is intentionally ignored).
-- A table is reported as `changed` only when there is an **actionable, data-safe**
-  difference. `drift` therefore converges to `0` for structurally-identical schemas.
-
-Programmable objects (views, procedures, functions) are still compared by normalized text.
-
-## 4.1.3) Object-Level Reporting
-
-`diff`, `drift` and `sync` print the identifiers of the objects involved, e.g.:
-
-```text
-Resumen: added=1, changed=1, removed=0, skipped=0
-  Added (1): [dbo].[Department]
-  Changed (1): [dbo].[Employee]
-```
-
-## 4.1.1) Dependency-Aware Ordering
-
-When generating diff/sync scripts, SQLDiff now orders create/alter statements using dependency analysis:
-- Table dependencies from foreign keys.
-- Programmable object dependencies from SQL expression metadata.
-
-This reduces failures caused by invalid creation order for related objects.
-If a dependency cycle is detected, SQLDiff appends remaining objects in fallback order and emits a warning comment in the script.
-
-## 5) Commands
-
-### `extract`
-```text
-extract --conn <connectionString> [--out schema.sql] [--json snapshot.json]
-```
-
-### `diff`
-```text
-diff (--source-conn <cs> | --source-snapshot <json>)
-     (--target-conn <cs> | --target-snapshot <json>)
-     [--out diff.sql]
-     [--include-drops]
-     [--include-table-drops]
-     [--allow-table-rebuild]
-     [--add-only]
-```
-
-### `sync`
-```text
-sync (--source-conn <cs> | --source-snapshot <json>)
-     (--target-conn <cs> | --target-snapshot <json>)
-     [--out sync.diff.sql]
-     [--include-drops]
-     [--include-table-drops]
-     [--allow-table-rebuild]
-     [--add-only]
-     [--apply]
-     [--dry-run]
-     [--timeout-seconds 120]
-```
-
-### `deploy` (new)
-Single command for `diff + apply`.
-
-```text
-deploy (--source-conn <cs> | --source-snapshot <json>)
-       --target-conn <cs>
-       [--out deploy.diff.sql]
-       [--include-drops]
-       [--include-table-drops]
-       [--allow-table-rebuild]
-       [--add-only]
-       [--dry-run]
-       [--timeout-seconds 120]
-```
-
-`delta-apply` is available as an alias of `deploy`.
-
-### `apply`
-```text
-apply --conn <connectionString> --script <diff.sql> [--dry-run] [--timeout-seconds 120]
-      [--no-transaction] [--log apply.log]
-```
-
-By default `apply` (and `sync`/`deploy`) run **inside a single transaction**: if any
-batch fails, the whole change is rolled back and the target is left untouched
-(SQL Server DDL is transactional). Pass `--no-transaction` to execute batch-by-batch
-without atomicity. Pass `--log <file>` to append an audit entry (timestamp, server,
-database, script, batches executed, outcome) for each run.
-
-### `check-conn`
-```text
-check-conn (--conn <cs> | --source-conn <cs> [--target-conn <cs>]) [--timeout-seconds 15]
-```
-
-### `drift`
-```text
-drift (--source-conn <cs> | --source-snapshot <json>)
-      (--target-conn <cs> | --target-snapshot <json>)
-      [--out drift.sql]
-```
-
-`drift` returns exit code `2` when differences are detected.
-
-## 6) New Flag: `--add-only`
-
-`--add-only` is designed for this scenario:
-- Target already has some objects.
-- You only want to create objects that are missing.
-- You do not want alter/drop behavior.
-
-Behavior:
-- Includes only objects existing in source and missing in target.
-- Skips changed existing objects.
-- Ignores drop generation.
-
-## 7) Recommended Client Workflow
-
-### Step 1: Validate target connection
-```powershell
-.\SqlSchemaDiff.exe check-conn --conn "Data Source=PHXDEV\SQL2019;Initial Catalog=MonetPublisher;User Id=cubo;Password=***;TrustServerCertificate=True"
-```
-
-### Step 2 (Option A): Single command (`deploy`)
-Use source snapshot (or source connection) against target and apply in one shot:
-
-```powershell
-.\SqlSchemaDiff.exe deploy `
-  --source-snapshot .\source.snapshot.json `
-  --target-conn "Data Source=PHXDEV\SQL2019;Initial Catalog=MonetPublisher;User Id=cubo;Password=***;TrustServerCertificate=True" `
-  --out .\deploy.addonly.sql `
-  --add-only
-```
-
-### Step 2 (Option B): Two-step (diff + apply)
-Generate script first:
-
-```powershell
-.\SqlSchemaDiff.exe diff `
-  --source-snapshot .\source.snapshot.json `
-  --target-conn "Data Source=PHXDEV\SQL2019;Initial Catalog=MonetPublisher;User Id=cubo;Password=***;TrustServerCertificate=True" `
-  --out .\delta.addonly.sql `
-  --add-only
-```
-
-Then apply:
-
-```powershell
-.\SqlSchemaDiff.exe apply --conn "Data Source=PHXDEV\SQL2019;Initial Catalog=MonetPublisher;User Id=cubo;Password=***;TrustServerCertificate=True" --script .\delta.addonly.sql
-```
-
-## 8) Examples Catalog
-
-### A. Help
-```powershell
-.\SqlSchemaDiff.exe --help
-```
-
-### B. Connection checks
-```powershell
-.\SqlSchemaDiff.exe check-conn --conn "Server=SQL1;Database=DbA;User Id=sa;Password=***;Encrypt=True;TrustServerCertificate=True"
-```
-
-```powershell
-.\SqlSchemaDiff.exe check-conn `
-  --source-conn "Server=SQL1;Database=DbA;..." `
-  --target-conn "Server=SQL2;Database=DbA;..."
-```
-
-### C. Extract
-```powershell
-.\SqlSchemaDiff.exe extract `
-  --conn "Server=SQL1;Database=DbA;..." `
-  --out .\artifacts\source.sql `
-  --json .\artifacts\source.snapshot.json
-```
-
-### D. Diff (standard)
-```powershell
-.\SqlSchemaDiff.exe diff `
-  --source-conn "Server=SQL1;Database=DbA;..." `
-  --target-conn "Server=SQL2;Database=DbA;..." `
-  --out .\artifacts\diff.sql
-```
-
-### E. Diff (add only)
-```powershell
-.\SqlSchemaDiff.exe diff `
-  --source-conn "Server=SQL1;Database=DbA;..." `
-  --target-conn "Server=SQL2;Database=DbA;..." `
-  --out .\artifacts\diff.addonly.sql `
-  --add-only
-```
-
-### F. Sync + apply (add only)
-```powershell
-.\SqlSchemaDiff.exe sync `
-  --source-conn "Server=SQL1;Database=DbA;..." `
-  --target-conn "Server=SQL2;Database=DbA;..." `
-  --out .\artifacts\sync.addonly.sql `
-  --add-only `
-  --apply
-```
-
-### G. Deploy in one command (add only)
-```powershell
-.\SqlSchemaDiff.exe deploy `
-  --source-snapshot .\artifacts\source.snapshot.json `
-  --target-conn "Server=SQL2;Database=DbA;..." `
-  --out .\artifacts\deploy.addonly.sql `
-  --add-only
-```
-
-### H. Apply SQL
-```powershell
-.\SqlSchemaDiff.exe apply `
-  --conn "Server=SQL2;Database=DbA;..." `
-  --script .\artifacts\diff.addonly.sql
-```
-
-### I. Drift in CI
-```powershell
-.\SqlSchemaDiff.exe drift `
-  --source-conn "Server=SQL1;Database=DbA;..." `
-  --target-conn "Server=SQL2;Database=DbA;..." `
-  --out .\artifacts\drift.sql
-```
-
-## 9) Troubleshooting
-
-### Error: `Comando no soportado: --`
-Cause: command used as `SqlSchemaDiff.exe -- extract ...`.
-Fix: remove the extra `--`.
-
-Correct:
-```powershell
-SqlSchemaDiff.exe extract --conn "..." --out publish.sql
-```
-
-### A changed table is skipped instead of synced
-Cause: an old snapshot JSON (pre column-level sync) has no structured table metadata.
-Fix: re-extract the source with the current version so the snapshot includes the
-`Table` model, then re-run `diff`/`deploy`. Live connections always use the new path.
-
-### Error: `There is already an object named 'X' in the database`
-Cause: applying a full extract script (`publish.sql`) on a DB that already has objects.
-
-Fix:
-1. Generate diff SQL, not full extract.
-2. Use `--add-only` when you only want missing objects.
-3. Apply the resulting delta script.
-
-```powershell
-.\SqlSchemaDiff.exe diff --source-snapshot .\source.snapshot.json --target-conn "..." --out .\delta.sql --add-only
-.\SqlSchemaDiff.exe apply --conn "..." --script .\delta.sql
-```
-
-Or use one command:
-
-```powershell
-.\SqlSchemaDiff.exe deploy --source-snapshot .\source.snapshot.json --target-conn "..." --out .\deploy.sql --add-only
-```
-
-### Related objects fail due to creation order
-Cause: object dependencies are complex or cyclical.
-
-Fix:
-1. Regenerate script with current SQLDiff version (dependency-aware ordering).
-2. Prefer `diff`/`sync` output over raw full extract for updates.
-3. If needed, split cycles manually into two passes (base objects first, dependent objects second).
-
-### TLS/certificate issues
-- Use `Encrypt=True;TrustServerCertificate=True` for internal/dev setups.
-- In production, use trusted certificates.
-
-### Timeout during apply
-- Increase timeout:
-```powershell
-.\SqlSchemaDiff.exe apply --conn "..." --script .\delta.sql --timeout-seconds 600
-```
-
-## 10) Exit Codes
-
-- `0` success
-- `1` error
-- `2` drift detected (`drift` command)
-
-## 11) Optional: Build and Publish From Source
-
-```powershell
-dotnet restore .\SqlSchemaDiff.csproj
-dotnet build .\SqlSchemaDiff.csproj
-dotnet publish .\SqlSchemaDiff.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true
-```
+> **The generated script is the product.** `diff` never touches the target — it writes
+> a file. Read it, put it in a pull request, hand it to a DBA. `deploy` is the same
+> thing plus an apply, and the apply runs in one transaction that rolls back whole.
+>
+> A generated script is a **delta for one specific pair of databases**, so it is not
+> meant to be re-run: applying it twice fails on the objects it already created. To
+> bring a target up to date again, run `diff`/`deploy` again — against a target that
+> already matches, it produces an empty script and does nothing.
 
 ---
 
+## What it actually does
+
+Point it at two databases. It emits `ALTER` statements that carry the target forward,
+**preserving the rows that are already there.**
+
+<details open>
+<summary><b>A worked example</b> — widen a column, add a column, leave the rest alone</summary>
+
+Source has an extra `Tier` column and a wider `Email`. Target has a `LegacyCode`
+column of its own, one row of data, and an index sitting on the column being widened.
+
+```sql
+-- source                                    -- target
+CREATE TABLE dbo.Customer(                   CREATE TABLE dbo.Customer(
+  Id    int IDENTITY PRIMARY KEY,              Id         int IDENTITY PRIMARY KEY,
+  Name  nvarchar(100) NOT NULL,                Name       nvarchar(100) NOT NULL,
+  Email varchar(256) NULL,                     Email      varchar(80) NULL,
+  Tier  tinyint NOT NULL DEFAULT (1));         LegacyCode char(4) NULL);
+CREATE INDEX IX_Customer_Email                CREATE INDEX IX_Customer_Email
+  ON dbo.Customer(Email);                       ON dbo.Customer(Email);
+```
+
+```console
+$ sqldiff diff --source-conn "...DemoSrc..." --target-conn "...DemoDst..." --out demo.sql
+Diff SQL written to: /work/demo.sql
+Summary: added=0, changed=1, removed=0, skipped=0
+  Changed (1): [dbo].[Customer]
+```
+
+```sql
+-- demo.sql
+SET ANSI_NULLS ON;
+SET QUOTED_IDENTIFIER ON;
+GO
+
+-- ALTER [dbo].[Customer] (column-level sync)
+-- WARNING: column [LegacyCode] exists only on target and was not dropped. Use --include-drops to remove it.
+DROP INDEX [IX_Customer_Email] ON [dbo].[Customer];
+GO
+ALTER TABLE [dbo].[Customer] ADD [Tier] tinyint NOT NULL CONSTRAINT [DF_Customer_Tier] DEFAULT ((1));
+GO
+ALTER TABLE [dbo].[Customer] ALTER COLUMN [Email] varchar(256) COLLATE SQL_Latin1_General_CP1_CI_AS NULL;
+GO
+CREATE NONCLUSTERED INDEX [IX_Customer_Email] ON [dbo].[Customer] ([Email] ASC);
+GO
+```
+
+Four things worth noticing, because they are the whole point:
+
+1. **No `DROP TABLE`.** The row in the target survives, and `Tier` is backfilled by its
+   default.
+2. **The index came down and went back up.** SQL Server refuses `ALTER COLUMN` while an
+   index references the column — so the index is dropped before and recreated after,
+   even though the index itself is not changing.
+3. **`LegacyCode` was left alone**, with a comment saying so. Destructive operations
+   need `--include-drops`; silence is never the answer.
+4. **The `SET` options are there** so the script also runs correctly through `sqlcmd`
+   and SSMS, which do not inherit them.
+
+</details>
+
+## Install
+
+**Download a binary** — [Releases](https://github.com/peopleworks/SqlSchemaDiff/releases)
+carries a self-contained `sqldiff` for Windows and Linux. Nothing to install alongside
+it; the .NET runtime is bundled.
+
+**Or build it** — needs the [.NET 9 SDK](https://dotnet.microsoft.com/download):
+
+```bash
+git clone https://github.com/peopleworks/SqlSchemaDiff.git
+cd SqlSchemaDiff
+dotnet build SqlSchemaDiff.csproj -c Release
+dotnet bin/Release/net9.0/sqldiff.dll --help
+```
+
+**Or as a .NET global tool** — the project packs as one, and the release workflow
+publishes it when a `NUGET_API_KEY` secret is present:
+
+```bash
+dotnet tool install --global SqlSchemaDiff   # installs the `sqldiff` command
+```
+
+Runs on Windows, Linux and macOS. Works against **SQL Server 2016 and newer**, any
+edition — Developer, Express and Azure SQL included.
+
+## The commands
+
+| Command | What it does |
+|---|---|
+| `check-conn` | Verify a connection and print server, database, login, version, edition. |
+| `extract` | Script a whole database to `.sql`, and optionally a `.json` snapshot. |
+| `diff` | Compare source against target, write the migration script. **Never touches the target.** |
+| `apply` | Run an existing script against a database, in one transaction. |
+| `deploy` | `diff` + `apply` in one step. `sync` is the same with an explicit `--apply`. |
+| `drift` | Like `diff`, but **exits 2** when anything differs. Built for CI. |
+
+Run `sqldiff --help` for the full option list.
+
+### The usual sequence
+
+```bash
+# 1. Make sure you can reach both sides.
+sqldiff check-conn --source-conn "$DEV" --target-conn "$PROD"
+
+# 2. Write the script — nothing is applied.
+sqldiff diff --source-conn "$DEV" --target-conn "$PROD" --out changes.sql
+
+# 3. Read changes.sql. This is the step that matters.
+
+# 4. Apply it.
+sqldiff apply --conn "$PROD" --script changes.sql --log apply.log
+```
+
+### Snapshots: compare without both databases online
+
+`extract --json` writes the source structure to a file. Commit it, ship it, diff against
+it later — useful when the source is a developer machine and the target is a customer
+server you reach once a month.
+
+```bash
+sqldiff extract --conn "$DEV" --out schema.sql --json schema.snapshot.json
+sqldiff deploy  --source-snapshot schema.snapshot.json --target-conn "$CUSTOMER" --add-only
+```
+
+## Safety
+
+This is a tool that writes DDL against databases with data in them, so the defaults lean
+conservative.
+
+- **One transaction.** `apply`, `sync` and `deploy` run every batch in a single
+  transaction. If any batch fails, the whole change rolls back and the target is left
+  exactly as it was. `--no-transaction` opts out.
+- **Nothing is dropped unless you ask.** A column, constraint or index that exists only
+  on the target is reported as a `-- WARNING:` comment and left in place. `--include-drops`
+  enables dropping them; dropping whole tables needs `--include-table-drops` on top.
+- **Tables are never rebuilt implicitly.** A changed table produces `ALTER` statements.
+  `--allow-table-rebuild` is the only way to get `DROP`/`CREATE`, and it says plainly that
+  it can lose data.
+- **Risky changes are annotated in the script**, not buried in a log:
+
+  ```sql
+  -- WARNING: new column [Code] is NOT NULL without a default; ADD will fail if the table already has rows.
+  -- WARNING: column [Status] becomes NOT NULL; ALTER fails if it contains NULLs. Backfill first.
+  -- WARNING: column [Sku] type narrows (varchar(200) -> varchar(50)); review for data truncation.
+  -- WARNING: column [Id] identity property differs and cannot be changed with ALTER COLUMN. Manual table rebuild required.
+  ```
+
+- **`--dry-run`** parses the script into batches and reports the count without executing.
+- **`--add-only`** creates what is missing and changes nothing that exists — the safest
+  mode for pushing new objects to a customer database.
+- **`--log <file>`** appends an audit record per run: timestamp, server, database, script,
+  batches executed, and the outcome (`applied` / `rolled-back` / `failed`). It records the
+  server and database from the connection string, never the password.
+
+## Connection strings
+
+**A password typed as a command-line argument is not private.** Any other process on the
+machine can read the full command line, your shell writes it to history, and most CI
+runners echo it. SQLDiff takes the connection string three other ways:
+
+```bash
+sqldiff extract --conn-file ./prod.conn     # a file whose permissions you control
+sqldiff extract --conn env:MY_CONN          # indirection through a named variable
+SQLDIFF_CONN="Server=..." sqldiff extract   # the default variable
+```
+
+Both sides have the same three forms: `--source-conn` / `--source-conn-file` /
+`SQLDIFF_SOURCE_CONN`, and `--target-conn` / `--target-conn-file` / `SQLDIFF_TARGET_CONN`.
+
+On Windows, `Integrated Security=True` avoids a stored password entirely:
+
+```text
+Server=SQL1;Database=App;Integrated Security=True;Encrypt=True;TrustServerCertificate=True
+```
+
+`TrustServerCertificate=True` is for internal and development servers. In production, use a
+certificate the client trusts.
+
+## Drift detection in CI
+
+`drift` exits **2** when the databases differ, **0** when they match — so a pipeline can
+fail the build when production has quietly diverged from the schema in your repository.
+
+```yaml
+- name: Fail if production drifted from the committed schema
+  run: |
+    sqldiff drift \
+      --source-snapshot schema.snapshot.json \
+      --target-conn "$PROD_CONN" \
+      --out drift.sql
+  env:
+    PROD_CONN: ${{ secrets.PROD_CONN }}
+```
+
+`drift` enables `--include-drops` and `--include-table-drops` by default, because its job
+is to report *every* difference — including objects that exist only on the target. The
+script it writes is a report; do not pipe it into `apply` without reading it.
+
+## What it covers
+
+| Supported | Not yet |
+|---|---|
+| Tables, columns, identity, computed & persisted columns, collation, defaults | Triggers, sequences, synonyms |
+| Primary keys, unique constraints, check constraints, foreign keys | Table types, CLR types, assemblies |
+| Indexes: clustered, nonclustered, unique, filtered, `INCLUDE`, `DESC` | Columnstore, XML, spatial and hash indexes *(reported, not scripted)* |
+| Views, stored procedures, scalar and table-valued functions | Extended properties, permissions, users and roles |
+| Schemas and user-defined alias types (as prerequisites) | Partition schemes and functions, filegroups |
+| System-named constraints, matched by shape rather than by name | Temporal `SYSTEM_VERSIONING` clauses *(history tables are skipped)* |
+
+Anything in the right-hand column is skipped rather than mangled, and the ones that could
+matter for correctness are **reported on the console** rather than dropped silently:
+
+```console
+  NOTE: skipped index [CCI_Sales] on [dbo].[Sales]: unsupported index type CLUSTERED COLUMNSTORE
+  NOTE: skipped [dbo].[EmployeeHistory]: temporal history table (managed by SQL Server)
+```
+
+**Column order is not drift.** Tables are compared structurally — columns, constraints and
+indexes matched by identity, not by rendered text — so the same columns in a different
+physical order compare equal. Reordering a column would require a destructive rebuild, so
+it is deliberately ignored rather than reported forever.
+
+## Two design decisions worth knowing about
+
+**Constraints SQL Server named itself are matched by shape, not by name.** An unnamed
+primary key gets a per-database random suffix — `PK__Orders__3214EC07CF883821` on one
+database and `PK__Orders__3214EC073F741784` on another. Matching those by name makes every
+database look permanently different and generates an `ADD CONSTRAINT` that fails. SQLDiff
+matches them by the columns they cover and creates them without a name, letting the target
+generate its own.
+
+**Extraction reads the whole database in a fixed number of queries.** Metadata is fetched
+with one set-based query per catalog view and grouped in memory, rather than a few queries
+per table plus one per index. Measured on a 200-table, 600-index database: **1,430 queries
+before, 11 after.** The saving scales with network latency, so it matters most when the
+server is not on your machine.
+
+## How it compares
+
+| | SQLDiff | SSDT / DACPAC | Commercial tools |
+|---|---|---|---|
+| Cost | Free, MIT | Free | Paid, per seat |
+| Needs a project file | No | Yes (`.sqlproj`) | No |
+| Runs headless in CI | Yes, single binary | Yes, with the toolchain installed | Usually |
+| Object coverage | Focused (see table above) | Very broad | Very broad |
+| Generated script | Plain T-SQL you read first | Plain T-SQL | Plain T-SQL |
+
+If you need full coverage of every SQL Server feature, use SSDT or a commercial tool — that
+is what they are for. SQLDiff is for the common case: **keep the structure of a handful of
+databases in step, from a script, without ceremony.**
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[Source database] -->|extract| B[Source snapshot]
+    C[Target database] -->|extract| D[Target snapshot]
+    B --> E{SchemaDiffer}
+    D --> E
+    E --> P[Prerequisites<br/>schemas, alias types]
+    E --> T[TableDiffer<br/>column-level ALTER]
+    E --> M[Modules<br/>CREATE OR ALTER]
+    P & T & M --> F[Migration script]
+    F -->|apply, one transaction| C
+```
+
+Source layout:
+
+```text
+Models/       snapshot shapes (DatabaseSnapshot, TableModel, AliasTypeModel, ...)
+Services/
+  SqlServerSchemaExtractor   reads catalog views into a snapshot
+  SqlRender                  renders every piece of SQL, shared by extract and diff
+  SchemaDiffer               object-level diff, dependency ordering, prerequisites
+  TableDiffer                column-level diff producing ALTER statements
+  SqlModuleRewriter          CREATE -> CREATE OR ALTER, comment-aware
+  SqlBatchExecutor           splits on GO, executes in one transaction
+  ConnectionStringResolver   option / file / environment, and password masking
+  AuditLogger                append-only record of every apply
+tests/        xUnit; RegressionTests.cs pins each fixed bug to the error it caused
+```
+
+## Troubleshooting
+
+<details>
+<summary><code>There is already an object named 'X' in the database</code></summary>
+
+You applied a **full extract** (`schema.sql`) to a database that already has objects. A
+full extract is a create-from-nothing script. Use `diff` to generate a delta instead:
+
+```bash
+sqldiff diff --source-snapshot schema.snapshot.json --target-conn "$TARGET" --out delta.sql --add-only
+sqldiff apply --conn "$TARGET" --script delta.sql
+```
+</details>
+
+<details>
+<summary><code>The specified schema name "app" either does not exist</code></summary>
+
+Fixed in 1.3.0 — generated scripts now create the schemas they need. If you are applying a
+script produced by an older version, regenerate it.
+</details>
+
+<details>
+<summary>A changed table is skipped instead of synced</summary>
+
+The snapshot JSON predates column-level sync and carries no structured table metadata.
+Re-run `extract` with the current version so the snapshot includes the `Table` model, then
+diff again. Live connections always use the current path.
+</details>
+
+<details>
+<summary>Related objects fail because of creation order</summary>
+
+SQLDiff orders creates by dependency — foreign keys for tables, `sys.sql_expression_dependencies`
+for modules. A genuine cycle cannot be ordered; the script appends the remainder with a
+warning comment, and you apply it twice or split it by hand.
+</details>
+
+<details>
+<summary>Timeout while applying</summary>
+
+`--timeout-seconds 600`. The default is 120 seconds per batch.
+</details>
+
+<details>
+<summary><code>Unknown command: --</code></summary>
+
+`sqldiff -- extract ...` — drop the stray `--`. The command comes first: `sqldiff extract ...`.
+</details>
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | Error — the message is on stderr |
+| `2` | Drift detected (`drift` only) |
+
+## Roadmap
+
+- [x] Column-level `ALTER TABLE` that preserves data
+- [x] Transactional apply with rollback, and an audit log
+- [x] Schemas and alias types as script prerequisites
+- [x] Credentials that stay off the command line
+- [x] Packaging as a `dotnet tool`
+- [ ] More object types: triggers, sequences, synonyms, table types
+- [ ] Extended properties
+- [ ] `--report` mode: a readable HTML diff alongside the script
+
+Contributions are welcome — [CONTRIBUTING.md](CONTRIBUTING.md) has the setup, the house
+style, and the two gotchas that have caused most of the bugs in this codebase.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md). Version 1.3.0 is an audit release: nine defects that
+each produced a real SQL Server error, every one reproduced before it was fixed and pinned
+by a regression test.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for how to report a vulnerability, how credentials are
+handled, and exactly what SQLDiff writes to disk.
+
+---
+
+## Credits
+
+Created by **Pedro Hernández — PeopleWorks**,
+[Microsoft MVP for .NET](https://mvp.microsoft.com/en-US/mvp/profile/24060a02-dbc6-44ec-bca5-c213ff9835c5).
+
+Built for the .NET and SQL Server community — *por y para la comunidad de desarrolladores.*
+
+Repo: <https://github.com/peopleworks/SqlSchemaDiff>
+
+Licensed under the [MIT License](LICENSE).
+
 <p align="center">
-  <strong>Created by PeopleWorks using Codex</strong><br/>
-  SQLDiff • SQL Server schema sync for real-world deployments
+  <sub><b>SQLDiff</b> • SQL Server schema sync for real-world deployments</sub>
 </p>

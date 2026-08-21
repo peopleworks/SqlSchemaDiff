@@ -18,6 +18,28 @@ public static class ScriptComposer
         sb.AppendLine($"-- Snapshot database: [{snapshot.DatabaseName}]");
         sb.AppendLine($"-- Generated (UTC): {snapshot.GeneratedAtUtc:yyyy-MM-dd HH:mm:ss}");
         sb.AppendLine();
+        sb.AppendLine(SqlRender.SessionOptionsPreamble);
+        sb.AppendLine("GO");
+        sb.AppendLine();
+
+        // Schemas and alias types come first: every table below may depend on them,
+        // and each statement is guarded so the script can be re-run safely.
+        if(snapshot.Schemas.Count > 0 || snapshot.Types.Count > 0)
+        {
+            sb.AppendLine("-- Prerequisites (schemas and user-defined types)");
+            sb.AppendLine("GO");
+            foreach(var schema in snapshot.Schemas)
+            {
+                sb.AppendLine(SqlRender.BuildSchemaCreate(schema));
+                sb.AppendLine("GO");
+            }
+            foreach(var type in snapshot.Types)
+            {
+                sb.AppendLine(SqlRender.BuildAliasTypeCreate(type));
+                sb.AppendLine("GO");
+            }
+            sb.AppendLine();
+        }
 
         foreach(var schemaObject in orderedObjects)
         {

@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Test
+        run: dotnet test tests/SqlSchemaDiff.Tests/SqlSchemaDiff.Tests.csproj -c Release
+
+      - name: Publish self-contained Windows executable
+        run: >
+          dotnet publish SqlSchemaDiff.csproj -c Release -r win-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:EnableCompressionInSingleFile=true
+          -o ./publish/win-x64
+
+      - name: Publish self-contained Linux executable
+        run: >
+          dotnet publish SqlSchemaDiff.csproj -c Release -r linux-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:EnableCompressionInSingleFile=true
+          -o ./publish/linux-x64
+
+      - name: Pack the .NET tool
+        run: dotnet pack SqlSchemaDiff.csproj -c Release -o ./artifacts
+
+      - name: Zip the executables
+        shell: pwsh
+        run: |
+          Compress-Archive -Path ./publish/win-x64/sqldiff.exe -DestinationPath ./artifacts/sqldiff-win-x64.zip
+          Compress-Archive -Path ./publish/linux-x64/sqldiff -DestinationPath ./artifacts/sqldiff-linux-x64.zip
+
+      - name: Create the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ./artifacts/*.zip
+            ./artifacts/*.nupkg
+          generate_release_notes: true
+
+      # Set the NUGET_API_KEY secret to publish; the step is skipped without it.
+      - name: Push to NuGet
+        if: ${{ secrets.NUGET_API_KEY != '' }}
+        run: >
+          dotnet nuget push ./artifacts/*.nupkg
+          --api-key ${{ secrets.NUGET_API_KEY }}
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate

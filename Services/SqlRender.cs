@@ -10,33 +10,67 @@ namespace SqlSchemaDiff.Services;
 /// </summary>
 public static class SqlRender
 {
+    /// <summary>
+    /// Prefix every generated script with the SET options SQL Server requires for
+    /// filtered indexes, indexed views and persisted computed columns. The .NET
+    /// client sets these already, but a script run through sqlcmd or SSMS does not
+    /// inherit them, and QUOTED_IDENTIFIER OFF makes those objects fail to create.
+    /// </summary>
+    public const string SessionOptionsPreamble = "SET ANSI_NULLS ON;\r\nSET QUOTED_IDENTIFIER ON;";
+
     public static string Quote(string name) => $"[{name.Replace("]", "]]")}]";
 
     public static string Quote(string schema, string name) => $"{Quote(schema)}.{Quote(name)}";
 
     public static string TableIdentifier(TableModel table) => Quote(table.Schema, table.Name);
 
+    /// <summary>Escapes a string for embedding inside a single-quoted T-SQL literal.</summary>
+    public static string Literal(string value) => value.Replace("'", "''");
+
+    /// <summary>
+    /// A guarded <c>CREATE SCHEMA</c>. <c>CREATE SCHEMA</c> must be the first
+    /// statement in its batch, so it is wrapped in <c>EXEC</c> to stay inside the
+    /// <c>IF</c>.
+    /// </summary>
+    public static string BuildSchemaCreate(string schema) =>
+        $"IF SCHEMA_ID(N'{Literal(schema)}') IS NULL{Environment.NewLine}" +
+        $"    EXEC(N'CREATE SCHEMA {Quote(schema).Replace("'", "''")}');";
+
+    /// <summary>A guarded <c>CREATE TYPE</c> for a user-defined alias type.</summary>
+    public static string BuildAliasTypeCreate(AliasTypeModel type)
+    {
+        var baseType = BuildTypeName(type.BaseTypeName, type.MaxLength, type.Precision, type.Scale);
+        var nullability = type.IsNullable ? "NULL" : "NOT NULL";
+        return
+            $"IF TYPE_ID(N'{Literal(type.Schema)}.{Literal(type.Name)}') IS NULL{Environment.NewLine}" +
+            $"    CREATE TYPE {Quote(type.Schema, type.Name)} FROM {baseType} {nullability};";
+    }
+
     public static string BuildType(ColumnModel column)
     {
         if(column.IsUserDefinedType)
             return $"{Quote(column.TypeSchema)}.{Quote(column.TypeName)}";
 
-        var name = column.TypeName;
-        return name.ToLowerInvariant() switch
+        return BuildTypeName(column.TypeName, column.MaxLength, column.Precision, column.Scale);
+    }
+
+    /// <summary>
+    /// Renders a system type with its length/precision facets. <paramref name="maxLength"/>
+    /// is the <c>sys.columns.max_length</c> convention: bytes, with <c>-1</c> meaning MAX.
+    /// </summary>
+    public static string BuildTypeName(string typeName, short maxLength, byte precision, byte scale) =>
+        typeName.ToLowerInvariant() switch
         {
             "varchar" or "char" or "varbinary" or "binary" =>
-                $"{name}({(column.MaxLength == -1 ? "MAX" : column.MaxLength.ToString())})",
+                $"{typeName}({(maxLength == -1 ? "MAX" : maxLength.ToString())})",
             "nvarchar" or "nchar" =>
-                $"{name}({(column.MaxLength == -1 ? "MAX" : (column.MaxLength / 2).ToString())})",
+                $"{typeName}({(maxLength == -1 ? "MAX" : (maxLength / 2).ToString())})",
             "decimal" or "numeric" =>
-                $"{name}({column.Precision},{column.Scale})",
+                $"{typeName}({precision},{scale})",
             "datetime2" or "datetimeoffset" or "time" =>
-                $"{name}({column.Scale})",
-            "float" when column.Precision != 53 =>
-                $"{name}({column.Precision})",
-            _ => name
+                $"{typeName}({scale})",
+            _ => typeName
         };
-    }
 
     public static string BuildColumnDefinition(ColumnModel column)
     {
@@ -51,7 +85,9 @@ public static class SqlRender
         sb.Append(' ');
         sb.Append(BuildType(column));
 
-        if(!string.IsNullOrWhiteSpace(column.CollationName))
+        // An alias type carries its own collation; restating it is a hard error
+        // ("COLLATE clause cannot be used on user-defined data types").
+        if(!string.IsNullOrWhiteSpace(column.CollationName) && !column.IsUserDefinedType)
             sb.Append($" COLLATE {column.CollationName}");
 
         if(column.IsIdentity)
@@ -68,13 +104,22 @@ public static class SqlRender
 
         if(!string.IsNullOrWhiteSpace(column.DefaultDefinition))
         {
-            if(!string.IsNullOrWhiteSpace(column.DefaultName))
-                sb.Append($" CONSTRAINT {Quote(column.DefaultName)}");
+            sb.Append(BuildConstraintNameClause(column.DefaultName, column.DefaultIsSystemNamed));
             sb.Append($" DEFAULT {column.DefaultDefinition}");
         }
 
         return sb.ToString();
     }
+
+    /// <summary>
+    /// Renders <c>CONSTRAINT [name]</c>, or nothing when SQL Server generated the
+    /// name. Auto-generated names carry a per-database random suffix
+    /// (<c>PK__Orders__3214EC07CF883821</c>), so reusing one on another database
+    /// bakes in a name that will never match — and reads as drift forever. Letting
+    /// the target generate its own keeps both sides comparable by shape.
+    /// </summary>
+    public static string BuildConstraintNameClause(string? name, bool isSystemNamed) =>
+        isSystemNamed || string.IsNullOrWhiteSpace(name) ? string.Empty : $" CONSTRAINT {Quote(name)}";
 
     public static string BuildIndexColumnExpression(IndexColumnModel column)
     {
@@ -97,22 +142,29 @@ public static class SqlRender
     {
         var columnsSql = string.Join(", ", keyConstraint.Columns.Select(BuildIndexColumnExpression));
         var constraintKind = keyConstraint.TypeCode == "PK" ? "PRIMARY KEY" : "UNIQUE";
-        var indexKind = keyConstraint.IndexTypeDesc.Contains("CLUSTERED", StringComparison.OrdinalIgnoreCase)
-            ? keyConstraint.IndexTypeDesc.Replace('_', ' ')
-            : "NONCLUSTERED";
+        var indexKind = IsClustered(keyConstraint.IndexTypeDesc) ? "CLUSTERED" : "NONCLUSTERED";
+        var nameClause = BuildConstraintNameClause(keyConstraint.Name, keyConstraint.IsSystemNamed);
 
-        return $"ALTER TABLE {TableIdentifier(table)} ADD CONSTRAINT {Quote(keyConstraint.Name)} " +
+        return $"ALTER TABLE {TableIdentifier(table)} ADD{nameClause} " +
                $"{constraintKind} {indexKind} ({columnsSql});";
     }
+
+    /// <summary>
+    /// True only for a clustered index. Note that <c>"NONCLUSTERED".Contains("CLUSTERED")</c>
+    /// is also true, which is why this compares the whole descriptor.
+    /// </summary>
+    public static bool IsClustered(string indexTypeDesc) =>
+        string.Equals(indexTypeDesc?.Trim(), "CLUSTERED", StringComparison.OrdinalIgnoreCase);
 
     public static string BuildForeignKeyAdd(TableModel table, ForeignKeyModel foreignKey)
     {
         var fkColumnsSql = string.Join(", ", foreignKey.Columns.Select(x => Quote(x.ParentColumn)));
         var refColumnsSql = string.Join(", ", foreignKey.Columns.Select(x => Quote(x.ReferencedColumn)));
         var withCheck = foreignKey.IsNotTrusted ? "WITH NOCHECK" : "WITH CHECK";
+        var nameClause = BuildConstraintNameClause(foreignKey.Name, foreignKey.IsSystemNamed);
 
         var sb = new StringBuilder();
-        sb.Append($"ALTER TABLE {TableIdentifier(table)} {withCheck} ADD CONSTRAINT {Quote(foreignKey.Name)}");
+        sb.Append($"ALTER TABLE {TableIdentifier(table)} {withCheck} ADD{nameClause}");
         sb.Append($" FOREIGN KEY ({fkColumnsSql})");
         sb.Append($" REFERENCES {Quote(foreignKey.ReferencedSchema, foreignKey.ReferencedTable)} ({refColumnsSql})");
 
@@ -132,7 +184,8 @@ public static class SqlRender
     public static string BuildCheckConstraintAdd(TableModel table, CheckConstraintModel check)
     {
         var withCheck = check.IsNotTrusted ? "WITH NOCHECK" : "WITH CHECK";
-        return $"ALTER TABLE {TableIdentifier(table)} {withCheck} ADD CONSTRAINT {Quote(check.Name)} CHECK {check.Definition};";
+        var nameClause = BuildConstraintNameClause(check.Name, check.IsSystemNamed);
+        return $"ALTER TABLE {TableIdentifier(table)} {withCheck} ADD{nameClause} CHECK {check.Definition};";
     }
 
     public static string BuildIndexCreate(TableModel table, IndexModel index)
@@ -150,6 +203,17 @@ public static class SqlRender
         sb.Append(';');
         return sb.ToString();
     }
+
+    public static string BuildIndexDrop(TableModel table, IndexModel index) =>
+        $"DROP INDEX {Quote(index.Name)} ON {TableIdentifier(table)};";
+
+    /// <summary>
+    /// Drops a constraint by name. Drops always come from the target model, so the
+    /// captured name is the one that actually exists there — including the random
+    /// name SQL Server generated for an unnamed constraint.
+    /// </summary>
+    public static string BuildConstraintDrop(TableModel table, string name) =>
+        $"ALTER TABLE {TableIdentifier(table)} DROP CONSTRAINT {Quote(name)};";
 
     /// <summary>Renders the complete CREATE TABLE script (table + keys + FKs + checks + indexes).</summary>
     public static string BuildTableCreateScript(TableModel table)
@@ -183,7 +247,7 @@ public static class SqlRender
             sb.AppendLine(BuildForeignKeyAdd(table, foreignKey));
             sb.AppendLine("GO");
 
-            if(foreignKey.IsDisabled)
+            if(foreignKey.IsDisabled && !foreignKey.IsSystemNamed)
             {
                 sb.AppendLine($"ALTER TABLE {tableIdentifier} NOCHECK CONSTRAINT {Quote(foreignKey.Name)};");
                 sb.AppendLine("GO");
@@ -197,7 +261,7 @@ public static class SqlRender
             sb.AppendLine(BuildCheckConstraintAdd(table, check));
             sb.AppendLine("GO");
 
-            if(check.IsDisabled)
+            if(check.IsDisabled && !check.IsSystemNamed)
             {
                 sb.AppendLine($"ALTER TABLE {tableIdentifier} NOCHECK CONSTRAINT {Quote(check.Name)};");
                 sb.AppendLine("GO");
