@@ -55,10 +55,14 @@ jobs:
           generate_release_notes: true
 
       # Set the NUGET_API_KEY secret to publish; the step is skipped without it.
+      # The secrets context is not available to a step-level `if`, so the value is
+      # read through env, which is.
       - name: Push to NuGet
-        if: ${{ secrets.NUGET_API_KEY != '' }}
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        if: env.NUGET_API_KEY != ''
         run: >
           dotnet nuget push ./artifacts/*.nupkg
-          --api-key ${{ secrets.NUGET_API_KEY }}
+          --api-key $env:NUGET_API_KEY
           --source https://api.nuget.org/v3/index.json
           --skip-duplicate
