@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" width="1200" height="600" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif">
+  <title>SQLDiff — change the shape, keep the rows</title>
+  <desc>A table on the left has three rows. SQLDiff emits ALTER TABLE statements that add a column and widen another. The table on the right has the new shape and the same three rows.</desc>
+<defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1e293b"/></marker>
+</defs>
+  <rect x="0" y="0" width="1200" height="600" rx="18" fill="#fdf6ec"/>
+  <text x="600" y="56" font-size="34" fill="#1e293b" text-anchor="middle" font-weight="800" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" letter-spacing="3">SQLDiff</text>
+  <text x="600" y="84" font-size="14.5" fill="#cc2927" text-anchor="middle" font-weight="700" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" letter-spacing="2.2">CHANGE THE SHAPE — KEEP THE ROWS</text>
+  <rect x="56" y="112" width="316" height="250" rx="14" fill="#fffdf8" stroke="#1e293b" stroke-width="2"/>
+  <text x="74" y="140" font-size="10.5" fill="#cc2927" text-anchor="start" font-weight="800" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" letter-spacing="1.3">TARGET — BEFORE</text>
+  <text x="74" y="168" font-size="14.5" fill="#1e293b" text-anchor="start" font-weight="700" font-family="Consolas, Menlo, Monaco, monospace">dbo.Customer</text>
+  <rect x="72" y="186" width="284" height="36" rx="6" fill="#fdf6ec"/>
+  <text x="81" y="202" font-size="11" fill="#1e293b" text-anchor="start" font-weight="700" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif">Id</text>
+  <text x="81" y="216" font-size="9" fill="#6b7280" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">int</text>
+  <text x="125" y="202" font-size="11" fill="#1e293b" text-anchor="start" font-weight="700" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif">Name</text>
+  <text x="125" y="216" font-size="9" fill="#6b7280" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">nvarchar(100)</text>
+  <line x1="116" y1="190" x2="116" y2="308" stroke="#cbd5e1" stroke-width="1.2"/>
+  <text x="241" y="202" font-size="11" fill="#1e293b" text-anchor="start" font-weight="700" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif">Email</text>
+  <text x="241" y="216" font-size="9" fill="#b45309" text-anchor="start" font-weight="700" font-family="Consolas, Menlo, Monaco, monospace">varchar(80)</text>
+  <line x1="232" y1="190" x2="232" y2="308" stroke="#cbd5e1" stroke-width="1.2"/>
+  <line x1="72" y1="222" x2="356" y2="222" stroke="#1e293b" stroke-width="1.4"/>
+  <text x="81" y="242" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">1</text>
+  <text x="125" y="242" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">Ada Lovelace</text>
+  <text x="241" y="242" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">ada@lab.io</text>
+  <line x1="72" y1="252" x2="356" y2="252" stroke="#cbd5e1" stroke-width="1.2"/>
+  <text x="81" y="272" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">2</text>
+  <text x="125" y="272" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">Grace Hopper</text>
+  <text x="241" y="272" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">grace@navy.io</text>
+  <line x1="72" y1="282" x2="356" y2="282" stroke="#cbd5e1" stroke-width="1.2"/>
+  <text x="81" y="302" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">3</text>
+  <text x="125" y="302" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">Alan Turing</text>
+  <text x="241" y="302" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">alan@bp.io</text>
+  <rect x="72" y="186" width="284" height="126" rx="6" fill="none" stroke="#cbd5e1" stroke-width="1.4"/>
+  <text x="74" y="344" font-size="10.5" fill="#6b7280" text-anchor="start" font-weight="400" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif">3 rows</text>
+  <rect x="828" y="112" width="316" height="250" rx="14" fill="#fffdf8" stroke="#1e293b" stroke-width="2"/>
+  <text x="846" y="140" font-size="10.5" fill="#cc2927" text-anchor="start" font-weight="800" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" letter-spacing="1.3">TARGET — AFTER</text>
+  <text x="846" y="168" font-size="14.5" fill="#1e293b" text-anchor="start" font-weight="700" font-family="Consolas, Menlo, Monaco, monospace">dbo.Customer</text>
+  <rect x="1076" y="186" width="52" height="126" rx="6" fill="#fbe9c9"/>
+  <rect x="844" y="186" width="284" height="36" rx="6" fill="#fdf6ec"/>
+  <text x="853" y="202" font-size="11" fill="#1e293b" text-anchor="start" font-weight="700" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif">Id</text>
+  <text x="853" y="216" font-size="9" fill="#6b7280" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">int</text>
+  <text x="893" y="202" font-size="11" fill="#1e293b" text-anchor="start" font-weight="700" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif">Name</text>
+  <text x="893" y="216" font-size="9" fill="#6b7280" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">nvarchar(100)</text>
+  <line x1="884" y1="190" x2="884" y2="308" stroke="#cbd5e1" stroke-width="1.2"/>
+  <text x="989" y="202" font-size="11" fill="#1e293b" text-anchor="start" font-weight="700" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif">Email</text>
+  <text x="989" y="216" font-size="9" fill="#b45309" text-anchor="start" font-weight="700" font-family="Consolas, Menlo, Monaco, monospace">varchar(256)</text>
+  <line x1="980" y1="190" x2="980" y2="308" stroke="#cbd5e1" stroke-width="1.2"/>
+  <text x="1085" y="202" font-size="11" fill="#1e293b" text-anchor="start" font-weight="700" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif">Tier</text>
+  <text x="1085" y="216" font-size="9" fill="#b45309" text-anchor="start" font-weight="700" font-family="Consolas, Menlo, Monaco, monospace">tinyint</text>
+  <line x1="1076" y1="190" x2="1076" y2="308" stroke="#cbd5e1" stroke-width="1.2"/>
+  <line x1="844" y1="222" x2="1128" y2="222" stroke="#1e293b" stroke-width="1.4"/>
+  <text x="853" y="242" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">1</text>
+  <text x="893" y="242" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">Ada Lovelace</text>
+  <text x="989" y="242" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">ada@lab.io</text>
+  <text x="1085" y="242" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">1</text>
+  <line x1="844" y1="252" x2="1128" y2="252" stroke="#cbd5e1" stroke-width="1.2"/>
+  <text x="853" y="272" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">2</text>
+  <text x="893" y="272" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">Grace Hopper</text>
+  <text x="989" y="272" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">grace@navy.io</text>
+  <text x="1085" y="272" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">1</text>
+  <line x1="844" y1="282" x2="1128" y2="282" stroke="#cbd5e1" stroke-width="1.2"/>
+  <text x="853" y="302" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">3</text>
+  <text x="893" y="302" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">Alan Turing</text>
+  <text x="989" y="302" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">alan@bp.io</text>
+  <text x="1085" y="302" font-size="11" fill="#1e293b" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">1</text>
+  <rect x="844" y="186" width="284" height="126" rx="6" fill="none" stroke="#cbd5e1" stroke-width="1.4"/>
+  <text x="846" y="344" font-size="10.5" fill="#15803d" text-anchor="start" font-weight="700" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif">the same 3 rows</text>
+  <text x="600" y="140" font-size="10.5" fill="#cc2927" text-anchor="middle" font-weight="800" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" letter-spacing="1.3">SQLDIFF EMITS</text>
+  <rect x="412" y="158" width="376" height="156" rx="12" fill="#1e293b"/>
+  <text x="430" y="188" font-size="11.5" fill="#fffdf8" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">ALTER TABLE [dbo].[Customer]</text>
+  <text x="452" y="209" font-size="11.5" fill="#fbbf24" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">ADD [Tier] tinyint NOT NULL DEFAULT (1);</text>
+  <text x="430" y="230" font-size="11.5" fill="#94a3b8" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">GO</text>
+  <text x="430" y="251" font-size="11.5" fill="#fffdf8" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">ALTER TABLE [dbo].[Customer]</text>
+  <text x="452" y="272" font-size="11.5" fill="#fbbf24" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">ALTER COLUMN [Email] varchar(256) NULL;</text>
+  <text x="430" y="293" font-size="11.5" fill="#94a3b8" text-anchor="start" font-weight="400" font-family="Consolas, Menlo, Monaco, monospace">GO</text>
+  <text x="600" y="340" font-size="11.5" fill="#6b7280" text-anchor="middle" font-weight="400" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif">one transaction — rolls back whole</text>
+  <text x="600" y="358" font-size="11.5" fill="#6b7280" text-anchor="middle" font-weight="400" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif">nothing dropped unless you ask for it</text>
+  <line x1="380" y1="232" x2="404" y2="232" stroke="#1e293b" stroke-width="2.4" marker-end="url(#ah)"/>
+  <line x1="796" y1="232" x2="820" y2="232" stroke="#1e293b" stroke-width="2.4" marker-end="url(#ah)"/>
+  <rect x="56" y="396" width="1088" height="80" rx="14" fill="#fffdf8" stroke="#cbd5e1" stroke-width="1.6"/>
+  <circle cx="100" cy="436.0" r="15" fill="#15803d"/>
+  <path d="M93.5,436.5 L98,441.5 L107,430.5" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="132" y="429" font-size="16" fill="#1e293b" text-anchor="start" font-weight="800" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif">No DROP TABLE. No rebuild. No data movement.</text>
+  <text x="132" y="453" font-size="12.5" fill="#6b7280" text-anchor="start" font-weight="400" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif">The migration is a plain .sql file you read before you run it — and drift comes back to zero.</text>
+  <text x="600" y="519" font-size="13" fill="#1e293b" text-anchor="middle" font-weight="700" font-family="Consolas, Menlo, Monaco, monospace">github.com/peopleworks/SqlSchemaDiff</text>
+  <text x="600" y="543" font-size="10.5" fill="#6b7280" text-anchor="middle" font-weight="700" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" letter-spacing="1.6">SQL SERVER 2016+   ·   .NET 9   ·   MIT   ·   PEOPLEWORKS</text>
+</svg>

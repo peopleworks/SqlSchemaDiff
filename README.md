@@ -10,6 +10,10 @@
 **Compare two SQL Server databases and generate the migration script that makes one
 match the other — without dropping your tables.**
 
+![SQLDiff turns a table with three rows into the source's shape: it adds a Tier column and widens Email with ALTER statements, and the same three rows are still there afterwards](assets/hero.svg)
+
+<sub>The target keeps its rows. Only the shape changes — and you get the script before anything runs.</sub>
+
 No SSDT project, no `.dacpac`, no SSMS, no license server. One command-line binary that
 reads schema metadata, works out the difference, and writes T-SQL you can read before
 you run it.
