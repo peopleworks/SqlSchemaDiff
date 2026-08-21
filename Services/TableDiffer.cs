@@ -21,7 +21,7 @@ public sealed class TableDiffer
 
     public TableAlterResult Diff(TableModel source, TableModel target, bool includeDrops)
     {
-        var pre = new List<string>();       // drops of constraints/indexes that change
+        var pre = new List<string>();       // drops of constraints/indexes
         var columnAdds = new List<string>();
         var columnAlters = new List<string>();
         var columnDrops = new List<string>();
@@ -31,6 +31,12 @@ public sealed class TableDiffer
 
         var sourceCols = ToDict(source.Columns, x => x.Name);
         var targetCols = ToDict(target.Columns, x => x.Name);
+
+        // Columns whose storage is being rewritten. SQL Server refuses ALTER COLUMN
+        // while an index, key or foreign key references the column, so anything that
+        // touches one of these has to be dropped first and put back afterwards —
+        // even when the object itself is not changing.
+        var rewrittenColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // ---- Columns ----
         foreach(var col in source.Columns)
@@ -52,7 +58,8 @@ public sealed class TableDiffer
                 continue;
 
             changeCount++;
-            AppendColumnAlter(source, col, targetCol, columnAlters, warnings);
+            if(AppendColumnAlter(source, col, targetCol, columnAlters, warnings))
+                rewrittenColumns.Add(col.Name);
         }
 
         // ---- Columns removed on source ----
@@ -68,7 +75,7 @@ public sealed class TableDiffer
             }
 
             if(!string.IsNullOrWhiteSpace(col.DefaultName))
-                columnDrops.Add($"ALTER TABLE {SqlRender.TableIdentifier(source)} DROP CONSTRAINT {SqlRender.Quote(col.DefaultName)};");
+                columnDrops.Add(SqlRender.BuildConstraintDrop(source, col.DefaultName));
             columnDrops.Add($"ALTER TABLE {SqlRender.TableIdentifier(source)} DROP COLUMN {SqlRender.Quote(col.Name)};");
             warnings.Add($"-- WARNING: dropping column [{col.Name}] on target permanently deletes its data.");
             changeCount++;
@@ -76,35 +83,39 @@ public sealed class TableDiffer
 
         // ---- Key constraints (PK / UQ) ----
         DiffNamed(
-            source.KeyConstraints, target.KeyConstraints, x => x.Name,
-            (s, t) => KeyConstraintsEqual(s, t),
+            source.KeyConstraints, target.KeyConstraints, KeyConstraintMatchKey,
+            KeyConstraintsEqual,
             add: s => post.Add(SqlRender.BuildKeyConstraintAdd(source, s)),
-            drop: t => pre.Add($"ALTER TABLE {SqlRender.TableIdentifier(source)} DROP CONSTRAINT {SqlRender.Quote(t.Name)};"),
-            includeDrops, ref changeCount, warnings, "key constraint");
+            drop: t => pre.Add(SqlRender.BuildConstraintDrop(source, t.Name)),
+            touches: x => x.Columns.Select(c => c.Name),
+            rewrittenColumns, includeDrops, ref changeCount, warnings, "key constraint");
 
         // ---- Check constraints ----
         DiffNamed(
-            source.CheckConstraints, target.CheckConstraints, x => x.Name,
+            source.CheckConstraints, target.CheckConstraints, CheckConstraintMatchKey,
             (s, t) => NormalizedEqual(s.Definition, t.Definition) && s.IsNotTrusted == t.IsNotTrusted,
             add: s => post.Add(SqlRender.BuildCheckConstraintAdd(source, s)),
-            drop: t => pre.Add($"ALTER TABLE {SqlRender.TableIdentifier(source)} DROP CONSTRAINT {SqlRender.Quote(t.Name)};"),
-            includeDrops, ref changeCount, warnings, "check constraint");
+            drop: t => pre.Add(SqlRender.BuildConstraintDrop(source, t.Name)),
+            touches: _ => Array.Empty<string>(),
+            rewrittenColumns, includeDrops, ref changeCount, warnings, "check constraint");
 
         // ---- Foreign keys ----
         DiffNamed(
-            source.ForeignKeys, target.ForeignKeys, x => x.Name,
-            (s, t) => ForeignKeysEqual(s, t),
+            source.ForeignKeys, target.ForeignKeys, ForeignKeyMatchKey,
+            ForeignKeysEqual,
             add: s => post.Add(SqlRender.BuildForeignKeyAdd(source, s)),
-            drop: t => pre.Add($"ALTER TABLE {SqlRender.TableIdentifier(source)} DROP CONSTRAINT {SqlRender.Quote(t.Name)};"),
-            includeDrops, ref changeCount, warnings, "foreign key");
+            drop: t => pre.Add(SqlRender.BuildConstraintDrop(source, t.Name)),
+            touches: x => x.Columns.Select(c => c.ParentColumn),
+            rewrittenColumns, includeDrops, ref changeCount, warnings, "foreign key");
 
         // ---- Indexes ----
         DiffNamed(
             source.Indexes, target.Indexes, x => x.Name,
-            (s, t) => IndexesEqual(s, t),
+            IndexesEqual,
             add: s => post.Add(SqlRender.BuildIndexCreate(source, s)),
-            drop: t => pre.Add($"DROP INDEX {SqlRender.Quote(t.Name)} ON {SqlRender.TableIdentifier(source)};"),
-            includeDrops, ref changeCount, warnings, "index");
+            drop: t => pre.Add(SqlRender.BuildIndexDrop(source, t)),
+            touches: x => x.Columns.Select(c => c.Name),
+            rewrittenColumns, includeDrops, ref changeCount, warnings, "index");
 
         var script = Compose(source, pre, columnAdds, columnAlters, columnDrops, post, warnings);
         return new TableAlterResult
@@ -115,7 +126,12 @@ public sealed class TableDiffer
         };
     }
 
-    private static void AppendColumnAlter(
+    /// <summary>
+    /// Emits the statements that turn <paramref name="tgt"/> into <paramref name="src"/>.
+    /// Returns true when the column's storage is rewritten, which means dependent
+    /// indexes and keys have to be dropped around the change.
+    /// </summary>
+    private static bool AppendColumnAlter(
         TableModel source, ColumnModel src, ColumnModel tgt,
         List<string> columnAlters, List<string> warnings)
     {
@@ -133,10 +149,10 @@ public sealed class TableDiffer
         if(src.IsComputed || tgt.IsComputed)
         {
             if(tgt.IsComputed && !string.IsNullOrWhiteSpace(tgt.DefaultName))
-                columnAlters.Add($"ALTER TABLE {tableId} DROP CONSTRAINT {SqlRender.Quote(tgt.DefaultName)};");
+                columnAlters.Add(SqlRender.BuildConstraintDrop(source, tgt.DefaultName));
             columnAlters.Add($"ALTER TABLE {tableId} DROP COLUMN {SqlRender.Quote(src.Name)};");
             columnAlters.Add($"ALTER TABLE {tableId} ADD {SqlRender.BuildColumnDefinition(src)};");
-            return;
+            return true;
         }
 
         // Type / nullability / collation change.
@@ -145,16 +161,18 @@ public sealed class TableDiffer
         var typeChanged = !string.Equals(srcType, tgtType, StringComparison.OrdinalIgnoreCase);
         var collationChanged = !string.Equals(src.CollationName, tgt.CollationName, StringComparison.OrdinalIgnoreCase);
         var nullabilityChanged = src.IsNullable != tgt.IsNullable;
+        var rewritten = false;
 
         if(typeChanged || collationChanged || nullabilityChanged)
         {
             var sb = new StringBuilder();
             sb.Append($"ALTER TABLE {tableId} ALTER COLUMN {SqlRender.Quote(src.Name)} {srcType}");
-            if(!string.IsNullOrWhiteSpace(src.CollationName))
+            if(!string.IsNullOrWhiteSpace(src.CollationName) && !src.IsUserDefinedType)
                 sb.Append($" COLLATE {src.CollationName}");
             sb.Append(src.IsNullable ? " NULL" : " NOT NULL");
             sb.Append(';');
             columnAlters.Add(sb.ToString());
+            rewritten = true;
 
             if(nullabilityChanged && !src.IsNullable)
                 warnings.Add($"-- WARNING: column [{src.Name}] becomes NOT NULL; ALTER fails if it contains NULLs. Backfill first.");
@@ -166,28 +184,31 @@ public sealed class TableDiffer
         if(!NormalizedEqual(src.DefaultDefinition ?? "", tgt.DefaultDefinition ?? ""))
         {
             if(!string.IsNullOrWhiteSpace(tgt.DefaultName))
-                columnAlters.Add($"ALTER TABLE {tableId} DROP CONSTRAINT {SqlRender.Quote(tgt.DefaultName)};");
+                columnAlters.Add(SqlRender.BuildConstraintDrop(source, tgt.DefaultName));
             if(!string.IsNullOrWhiteSpace(src.DefaultDefinition))
             {
-                var constraintName = string.IsNullOrWhiteSpace(src.DefaultName)
-                    ? string.Empty
-                    : $"CONSTRAINT {SqlRender.Quote(src.DefaultName)} ";
-                columnAlters.Add($"ALTER TABLE {tableId} ADD {constraintName}DEFAULT {src.DefaultDefinition} FOR {SqlRender.Quote(src.Name)};");
+                var constraintName = SqlRender.BuildConstraintNameClause(src.DefaultName, src.DefaultIsSystemNamed).TrimStart();
+                var prefix = constraintName.Length == 0 ? string.Empty : constraintName + " ";
+                columnAlters.Add($"ALTER TABLE {tableId} ADD {prefix}DEFAULT {src.DefaultDefinition} FOR {SqlRender.Quote(src.Name)};");
             }
         }
+
+        return rewritten;
     }
 
     private static void DiffNamed<T>(
-        List<T> source, List<T> target, Func<T, string> key,
+        List<T> source, List<T> target, Func<T, string> matchKey,
         Func<T, T, bool> equal, Action<T> add, Action<T> drop,
+        Func<T, IEnumerable<string>> touches,
+        HashSet<string> rewrittenColumns,
         bool includeDrops, ref int changeCount, List<string> warnings, string label)
     {
-        var targetByKey = ToDict(target, key);
-        var sourceByKey = ToDict(source, key);
+        var targetByKey = ToDict(target, matchKey);
+        var sourceByKey = ToDict(source, matchKey);
 
         foreach(var s in source)
         {
-            if(!targetByKey.TryGetValue(key(s), out var t))
+            if(!targetByKey.TryGetValue(matchKey(s), out var t))
             {
                 add(s);
                 changeCount++;
@@ -195,7 +216,16 @@ public sealed class TableDiffer
             }
 
             if(equal(s, t))
+            {
+                // Unchanged, but sitting on a column whose type is being rewritten:
+                // take it down and put it back so the ALTER COLUMN can go through.
+                if(DependsOnRewrittenColumn(t, touches, rewrittenColumns))
+                {
+                    drop(t);
+                    add(s);
+                }
                 continue;
+            }
 
             // Changed: drop then re-add.
             drop(t);
@@ -205,12 +235,20 @@ public sealed class TableDiffer
 
         foreach(var t in target)
         {
-            if(sourceByKey.ContainsKey(key(t)))
+            if(sourceByKey.ContainsKey(matchKey(t)))
                 continue;
 
             if(!includeDrops)
             {
-                warnings.Add($"-- WARNING: {label} [{key(t)}] exists only on target and was not dropped. Use --include-drops to remove it.");
+                warnings.Add($"-- WARNING: {label} [{DisplayName(t)}] exists only on target and was not dropped. Use --include-drops to remove it.");
+
+                // It still has to move out of the way of an ALTER COLUMN, so it is
+                // dropped and restored exactly as the target had it.
+                if(DependsOnRewrittenColumn(t, touches, rewrittenColumns))
+                {
+                    drop(t);
+                    add(t);
+                }
                 continue;
             }
 
@@ -218,6 +256,41 @@ public sealed class TableDiffer
             changeCount++;
         }
     }
+
+    private static bool DependsOnRewrittenColumn<T>(T item, Func<T, IEnumerable<string>> touches, HashSet<string> rewrittenColumns) =>
+        rewrittenColumns.Count > 0 && touches(item).Any(rewrittenColumns.Contains);
+
+    private static string DisplayName<T>(T item) => item switch
+    {
+        KeyConstraintModel k => k.Name,
+        CheckConstraintModel c => c.Name,
+        ForeignKeyModel f => f.Name,
+        IndexModel i => i.Name,
+        _ => item?.ToString() ?? string.Empty
+    };
+
+    // ------------------------------------------------------------ match keys
+
+    // A constraint SQL Server named itself carries a per-database random suffix
+    // (PK__Orders__3214EC07CF883821). Matching those by name would make every
+    // database look like it had a different constraint, so they are matched by the
+    // shape that actually defines them.
+
+    private static string KeyConstraintMatchKey(KeyConstraintModel k) =>
+        k.IsSystemNamed
+            ? $"~{k.TypeCode}:{string.Join(",", k.Columns.Select(c => $"{c.Name}:{c.IsDescending}"))}"
+            : k.Name;
+
+    private static string CheckConstraintMatchKey(CheckConstraintModel c) =>
+        c.IsSystemNamed ? $"~CK:{SchemaTextNormalizer.Normalize(c.Definition)}" : c.Name;
+
+    private static string ForeignKeyMatchKey(ForeignKeyModel f) =>
+        f.IsSystemNamed
+            ? $"~FK:{f.ReferencedSchema}.{f.ReferencedTable}:" +
+              string.Join(",", f.Columns.Select(c => $"{c.ParentColumn}>{c.ReferencedColumn}"))
+            : f.Name;
+
+    // ----------------------------------------------------------- composition
 
     private static string Compose(
         TableModel table,
@@ -247,6 +320,8 @@ public sealed class TableDiffer
         return sb.ToString();
     }
 
+    // ------------------------------------------------------------ comparison
+
     private static bool ColumnsEqual(ColumnModel a, ColumnModel b) =>
         string.Equals(SqlRender.BuildType(a), SqlRender.BuildType(b), StringComparison.OrdinalIgnoreCase) &&
         a.IsNullable == b.IsNullable &&
@@ -262,8 +337,7 @@ public sealed class TableDiffer
 
     private static bool KeyConstraintsEqual(KeyConstraintModel a, KeyConstraintModel b) =>
         a.TypeCode == b.TypeCode &&
-        a.IndexTypeDesc.Contains("CLUSTERED", StringComparison.OrdinalIgnoreCase) ==
-            b.IndexTypeDesc.Contains("CLUSTERED", StringComparison.OrdinalIgnoreCase) &&
+        SqlRender.IsClustered(a.IndexTypeDesc) == SqlRender.IsClustered(b.IndexTypeDesc) &&
         ColumnListEqual(a.Columns, b.Columns);
 
     private static bool ForeignKeysEqual(ForeignKeyModel a, ForeignKeyModel b) =>

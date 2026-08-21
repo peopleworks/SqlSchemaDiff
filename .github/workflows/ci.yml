@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore
+        run: dotnet restore SqlSchemaDiff.csproj
+
+      - name: Build
+        run: dotnet build SqlSchemaDiff.csproj -c Release --no-restore
+
+      - name: Test
+        run: dotnet test tests/SqlSchemaDiff.Tests/SqlSchemaDiff.Tests.csproj -c Release
+
+      - name: Pack (verify the tool package builds)
+        run: dotnet pack SqlSchemaDiff.csproj -c Release -o ./artifacts
+
+  integration:
+    name: round-trip against SQL Server
+    runs-on: ubuntu-latest
+
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          MSSQL_SA_PASSWORD: Str0ng!Passw0rd#CI
+        ports:
+          - 1433:1433
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Build
+        run: dotnet build SqlSchemaDiff.csproj -c Release
+
+      # The service container reports healthy before SQL Server finishes starting,
+      # so poll with the tool itself rather than trusting the container state.
+      - name: Wait for SQL Server
+        env:
+          SQLDIFF_CONN: Server=localhost,1433;Database=master;User Id=sa;Password=Str0ng!Passw0rd#CI;Encrypt=True;TrustServerCertificate=True
+        run: |
+          for i in $(seq 1 30); do
+            if dotnet bin/Release/net9.0/sqldiff.dll check-conn > /dev/null 2>&1; then
+              echo "SQL Server is up after ${i} attempt(s)."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "SQL Server did not become reachable." >&2
+          dotnet bin/Release/net9.0/sqldiff.dll check-conn
+          exit 1
+
+      # Builds a schema on one database, deploys it into an empty one, and requires
+      # drift to come back clean. This is the path that regressed in the past:
+      # custom schemas, system-named constraints and filtered indexes all have to
+      # survive the round trip.
+      - name: Deploy a schema into an empty database and check it converges
+        env:
+          BASE: Server=localhost,1433;User Id=sa;Password=Str0ng!Passw0rd#CI;Encrypt=True;TrustServerCertificate=True
+        run: |
+          set -euo pipefail
+          SQLDIFF="dotnet bin/Release/net9.0/sqldiff.dll"
+
+          printf '%s\n' \
+            'CREATE DATABASE SqlDiffSrc;' 'GO' \
+            'CREATE DATABASE SqlDiffDst;' 'GO' > /tmp/databases.sql
+
+          # CREATE DATABASE cannot run inside a transaction.
+          $SQLDIFF apply --conn "$BASE;Database=master" --script /tmp/databases.sql --no-transaction
+
+          cat > /tmp/schema.sql <<'SQL'
+          CREATE SCHEMA app;
+          GO
+          CREATE TABLE app.Customer(
+              Id int IDENTITY(1,1) NOT NULL CONSTRAINT PK_Customer PRIMARY KEY,
+              Name nvarchar(100) NOT NULL,
+              Email varchar(256) NULL,
+              Total decimal(12,2) NOT NULL DEFAULT (0),
+              CreatedAt datetime2(3) NOT NULL CONSTRAINT DF_Customer_CreatedAt DEFAULT (sysutcdatetime()));
+          GO
+          CREATE UNIQUE INDEX UX_Customer_Email ON app.Customer(Email) WHERE Email IS NOT NULL;
+          GO
+          CREATE VIEW app.vCustomer AS SELECT Id, Name FROM app.Customer;
+          GO
+          SQL
+
+          $SQLDIFF apply --conn "$BASE;Database=SqlDiffSrc" --script /tmp/schema.sql
+
+          $SQLDIFF deploy \
+            --source-conn "$BASE;Database=SqlDiffSrc" \
+            --target-conn "$BASE;Database=SqlDiffDst" \
+            --out /tmp/deploy.sql
+
+          echo "--- generated script ---"
+          cat /tmp/deploy.sql
+
+          $SQLDIFF drift \
+            --source-conn "$BASE;Database=SqlDiffSrc" \
+            --target-conn "$BASE;Database=SqlDiffDst"

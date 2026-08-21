@@ -5,7 +5,32 @@
     <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <AssemblyName>sqldiff</AssemblyName>
+    <RootNamespace>SqlSchemaDiff</RootNamespace>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
+
+  <!-- Packaging as a global .NET tool; installs the sqldiff command. -->
+  <PropertyGroup>
+    <Version>1.3.0</Version>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>sqldiff</ToolCommandName>
+    <PackageId>SqlSchemaDiff</PackageId>
+    <Title>SQLDiff</Title>
+    <Authors>Pedro Hernandez (PeopleWorks)</Authors>
+    <Company>PeopleWorks</Company>
+    <Description>Command-line schema diff and sync for SQL Server: extract a schema, compare two databases, and apply data-preserving ALTER scripts inside one transaction.</Description>
+    <PackageTags>sql-server;schema;diff;migration;devops;cli;dotnet-tool;database</PackageTags>
+    <PackageProjectUrl>https://github.com/peopleworks/SqlSchemaDiff</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/peopleworks/SqlSchemaDiff</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.2" />
