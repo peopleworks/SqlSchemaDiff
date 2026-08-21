@@ -67,7 +67,8 @@ internal static class ProgramMain
         var outJson = options.Get("--json");
 
         var extractor = new SqlServerSchemaExtractor();
-        var snapshot = await extractor.ExtractAsync(connectionString, CancellationToken.None);
+        var filter = options.GetObjectFilter();
+        var snapshot = filter.Apply(await extractor.ExtractAsync(connectionString, CancellationToken.None));
         var script = ScriptComposer.ComposeFullScript(snapshot);
 
         await File.WriteAllTextAsync(outSql, script);
@@ -87,8 +88,10 @@ internal static class ProgramMain
 
     private static async Task<int> RunDiffAsync(CliOptions options, string mode)
     {
-        var sourceSnapshot = await ResolveSnapshotAsync(options, ConnectionSide.Source);
-        var targetSnapshot = await ResolveSnapshotAsync(options, ConnectionSide.Target);
+        var filter = options.GetObjectFilter();
+        var sourceSnapshot = filter.Apply(await ResolveSnapshotAsync(options, ConnectionSide.Source));
+        var targetSnapshot = filter.Apply(await ResolveSnapshotAsync(options, ConnectionSide.Target));
+        PrintFilterNotice(options, filter);
 
         var includeDrops = options.GetBool("--include-drops", defaultValue: mode == "drift");
         var includeTableDrops = options.GetBool("--include-table-drops", defaultValue: mode == "drift");
@@ -195,8 +198,10 @@ internal static class ProgramMain
 
     private static async Task<int> RunSyncAsync(CliOptions options, bool forceApply)
     {
-        var source = await ResolveSnapshotAsync(options, ConnectionSide.Source);
-        var target = await ResolveSnapshotAsync(options, ConnectionSide.Target);
+        var filter = options.GetObjectFilter();
+        var source = filter.Apply(await ResolveSnapshotAsync(options, ConnectionSide.Source));
+        var target = filter.Apply(await ResolveSnapshotAsync(options, ConnectionSide.Target));
+        PrintFilterNotice(options, filter);
 
         var includeDrops = options.GetBool("--include-drops", defaultValue: false);
         var includeTableDrops = options.GetBool("--include-table-drops", defaultValue: false);
@@ -285,6 +290,27 @@ internal static class ProgramMain
         var result = await extractor.ExtractAsync(connectionString, CancellationToken.None);
         PrintNotices(extractor, label);
         return result;
+    }
+
+    /// <summary>
+    /// Says out loud that the comparison was narrowed. A filtered run that looks
+    /// like a full one is how someone concludes two databases match when half the
+    /// objects were never looked at.
+    /// </summary>
+    private static void PrintFilterNotice(CliOptions options, ObjectFilter filter)
+    {
+        if(filter.IsEmpty)
+            return;
+
+        var parts = new List<string>();
+        var include = options.Get("--include");
+        var exclude = options.Get("--exclude");
+        if(!string.IsNullOrWhiteSpace(include))
+            parts.Add($"include={include}");
+        if(!string.IsNullOrWhiteSpace(exclude))
+            parts.Add($"exclude={exclude}");
+
+        Console.WriteLine($"Filtered comparison ({string.Join(", ", parts)}); objects outside the filter were not compared.");
     }
 
     private static void PrintNotices(SqlServerSchemaExtractor extractor, string? label = null)
@@ -392,6 +418,17 @@ internal static class ProgramMain
                           [--timeout-seconds 15]
 
               version     Print the version. --version and -v also work.
+
+            Narrowing the comparison (all commands except apply and check-conn):
+              --include <patterns>       Compare only what matches. Comma-separated.
+              --exclude <patterns>       Skip what matches, applied after --include.
+              A pattern is [type:]glob, where type is table/view/proc/func and glob
+              takes * and ? and matches either schema.name or the bare name:
+                --include "Sales.*"              only the Sales schema
+                --exclude "proc:usp_Temp*,dbo.Audit*"
+                --exclude "view:"                every view
+              Filters apply to both sides, so a skipped object is never created,
+              altered or dropped.
 
             Connection strings (keep passwords off the command line):
               --conn "<cs>"              Literal value. Use env:NAME to read a variable.
@@ -508,6 +545,8 @@ internal sealed class CliOptions
         };
         throw new InvalidOperationException($"Missing connection string. Provide one of: {hint}.");
     }
+
+    public ObjectFilter GetObjectFilter() => ObjectFilter.Parse(Get("--include"), Get("--exclude"));
 
     public string GetRequired(params string[] names)
     {

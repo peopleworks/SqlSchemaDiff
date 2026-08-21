@@ -1,5 +1,3 @@
-using System.Text;
-using System.Text.RegularExpressions;
 using Microsoft.Data.SqlClient;
 
 namespace SqlSchemaDiff.Services;
@@ -64,34 +62,11 @@ public sealed class SqlBatchExecutor
         }
     }
 
-    public static List<string> SplitBatches(string script)
-    {
-        var result = new List<string>();
-        var current = new StringBuilder();
-
-        var lines = script.Replace("\r\n", "\n").Split('\n');
-        foreach(var line in lines)
-        {
-            if(Regex.IsMatch(line, @"^\s*GO\s*(--.*)?$", RegexOptions.IgnoreCase))
-            {
-                AddBatchIfAny(result, current);
-                continue;
-            }
-
-            current.AppendLine(line);
-        }
-
-        AddBatchIfAny(result, current);
-        return result;
-    }
-
-    private static void AddBatchIfAny(List<string> batches, StringBuilder sb)
-    {
-        var content = sb.ToString().Trim();
-        if(content.Length > 0)
-            batches.Add(content);
-        sb.Clear();
-    }
+    /// <summary>
+    /// Splits the script into batches on <c>GO</c>. See <see cref="SqlBatchSplitter"/>
+    /// for why this is not a line-by-line regular expression.
+    /// </summary>
+    public static List<string> SplitBatches(string script) => SqlBatchSplitter.Split(script);
 }
 
 public sealed record BatchExecutionResult(int BatchCount, int Executed, bool RolledBack, bool Transactional);

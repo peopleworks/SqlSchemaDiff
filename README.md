@@ -14,6 +14,11 @@ No SSDT project, no `.dacpac`, no SSMS, no license server. One command-line bina
 reads schema metadata, works out the difference, and writes T-SQL you can read before
 you run it.
 
+> **Moving rows, not columns?** Its sibling project
+> **[SyncJob](https://github.com/peopleworks/syncjob)** synchronises the *data* between
+> SQL Server databases. SQLDiff takes the structure, SyncJob takes the contents — see
+> [Related projects](#related-projects).
+
 ```bash
 sqldiff deploy --source-conn "Server=dev;Database=App;..." \
                --target-conn "Server=prod;Database=App;..." \
@@ -156,6 +161,28 @@ sqldiff extract --conn "$DEV" --out schema.sql --json schema.snapshot.json
 sqldiff deploy  --source-snapshot schema.snapshot.json --target-conn "$CUSTOMER" --add-only
 ```
 
+### Comparing only part of a database
+
+`--include` and `--exclude` narrow the comparison. A pattern is `[type:]glob`, where the
+type is `table`, `view`, `proc` or `func`, and the glob takes `*` and `?` and matches
+either `schema.name` or the bare name. Separate several with commas.
+
+```bash
+sqldiff diff ... --include "Sales.*"                    # one schema
+sqldiff diff ... --include "table:"                     # tables only
+sqldiff diff ... --exclude "proc:usp_Temp*,dbo.Audit*"  # skip scratch procs and audit tables
+sqldiff diff ... --include "dbo.Customer,dbo.Order*"    # a named handful
+```
+
+Filters apply to **both** sides. That matters: filtering only the source would leave a
+skipped object looking target-only, and a later `--include-drops` run would delete the very
+thing you asked it to leave alone. A filtered run says so on the first line of its output,
+so a narrowed comparison is never mistaken for a clean one:
+
+```console
+Filtered comparison (include=table:, exclude=dbo.T7); objects outside the filter were not compared.
+```
+
 ## Safety
 
 This is a tool that writes DDL against databases with data in them, so the defaults lean
@@ -283,6 +310,60 @@ If you need full coverage of every SQL Server feature, use SSDT or a commercial 
 is what they are for. SQLDiff is for the common case: **keep the structure of a handful of
 databases in step, from a script, without ceremony.**
 
+### Coming from SSMS Schema Compare
+
+The complaints people raise about SSMS 22.x Schema Compare map onto concrete answers here —
+and onto one honest gap:
+
+| The complaint | Where SQLDiff stands |
+|---|---|
+| **"5+ minutes to compare 50 tables and 100 procedures, with no progress indication."** | Measured on a database of that exact shape — 50 tables, 100 indexes, 20 views, 100 procedures, 10 functions — a full comparison takes **about 1 second**. It reads both databases in a fixed 11 queries rather than a few per object, so there is nothing to show progress for. |
+| **"Everything is checked by default and unchecking takes minutes."** | There is nothing to uncheck: the output is a script you read, not a grid you curate. Nothing destructive is in it unless you asked — `--include-drops` for columns and constraints, `--include-table-drops` for tables, `--allow-table-rebuild` for a rebuild. `--add-only` restricts a run to creating what is missing, and `--include` / `--exclude` narrow it to the objects you care about. |
+| **"Ignore options aren't honoured — column order, for one."** | Column order is **never** reported as drift. Tables are compared structurally, by matching columns, constraints and indexes on identity rather than diffing rendered text. Reordering a column would need a destructive rebuild, so it is deliberately ignored rather than reported forever. |
+| **"I'd like to ignore certain table properties, and can't."** | **This is a real gap.** Filtering is per object, not per property — you can skip a table, not just its collation or its fill factor. If a property matters to you, open an issue; that is how the ignore list should grow. |
+
+Two things SSMS Schema Compare does that SQLDiff does not: it covers **more object types**
+(users, roles, permissions, and much more of the surface), and it gives you a **visual
+review** of every difference before you commit to it. If either is what you need, it is the
+better tool — this one trades breadth for being a single binary that finishes in a second
+and hands you plain T-SQL.
+
+## ⇄ Companion tool — SyncJob
+
+SQLDiff moves **structure**. Its sibling, [**SyncJob**](https://github.com/peopleworks/SyncJob),
+moves **data**.
+
+| | SQLDiff | [SyncJob](https://github.com/peopleworks/SyncJob) |
+|---|---|---|
+| Moves | Schema — DDL | Data — DML |
+| Answers | *"Do these two databases have the same shape?"* | *"Does the destination have the same rows?"* |
+| Output | A T-SQL migration script you read before running | Rows in a table, with an audit trail |
+
+Together they cover a whole pipeline: **shape the destination, then fill it.**
+
+```bash
+# 1. Make the destination match the source's structure
+SQLDiff.exe deploy --source src.json --target "Server=DW;Database=Reporting;..."
+
+# 2. Move the data into it
+SyncJob.exe run -c appsettings.json --all
+```
+
+Drift detection is what ties them: `drift` exits with code `2` when two databases diverge,
+so a nightly data load can verify the shape before it runs rather than failing halfway —
+or, worse, succeeding into the wrong columns.
+
+```bash
+SQLDiff.exe drift --source "..." --target "..." || exit 1
+SyncJob.exe  run   -c appsettings.json --all
+```
+
+SyncJob's full-refresh mode publishes by swapping a stage and a final table **by name**,
+which requires both to have identical columns in identical order — a constraint SQLDiff can
+verify directly.
+
+---
+
 ## How it works
 
 ```mermaid
@@ -378,8 +459,10 @@ warning comment, and you apply it twice or split it by hand.
 - [x] Schemas and alias types as script prerequisites
 - [x] Credentials that stay off the command line
 - [x] Packaging as a `dotnet tool`
+- [x] `--include` / `--exclude` filters to narrow a comparison
 - [ ] More object types: triggers, sequences, synonyms, table types
 - [ ] Extended properties
+- [ ] Property-level ignore rules (ignore collation, fill factor, and similar)
 - [ ] `--report` mode: a readable HTML diff alongside the script
 
 Contributions are welcome — [CONTRIBUTING.md](CONTRIBUTING.md) has the setup, the house
@@ -396,6 +479,32 @@ by a regression test.
 See [SECURITY.md](SECURITY.md) for how to report a vulnerability, how credentials are
 handled, and exactly what SQLDiff writes to disk.
 
+## Related projects
+
+Two halves of the same problem. A database has a **shape** and it has **contents**, and
+keeping each in step between two servers is a different job:
+
+| | [**SQLDiff**](https://github.com/peopleworks/SqlSchemaDiff) *(this repo)* | [**SyncJob**](https://github.com/peopleworks/syncjob) |
+|---|---|---|
+| Moves | **Structure** — tables, columns, keys, indexes, views, procedures | **Data** — the rows themselves |
+| Answers | *"Why does staging not have the column production has?"* | *"How do I get last night's sales into the warehouse?"* |
+| Modes | One-shot CLI: `diff`, `deploy`, `drift` | CLI **and** a Windows Service for scheduled agents |
+| Strategy | Data-preserving `ALTER`, in one transaction | Full refresh or incremental (Timestamp, RowVersion, Change Tracking, CDC) |
+| Safety | Drops gated, warnings in the script, transactional apply | Stage/final two-phase load, row-count thresholds, `--dry-run` |
+
+Both are .NET 9, target SQL Server 2016 and newer, and are MIT-licensed.
+
+**They compose.** Ship the schema first, then the rows:
+
+```bash
+sqldiff  deploy --source-conn "$DEV" --target-conn "$WAREHOUSE"   # the structure
+SyncJob.exe run -c appsettings.json -s SalesSync                  # the rows
+```
+
+And in a pipeline, `sqldiff drift` is a good gate to put *in front of* a SyncJob run — if
+the destination's structure has drifted, a bulk load into it is going to fail anyway, and
+it fails more clearly here.
+
 ---
 
 ## Credits
@@ -410,5 +519,7 @@ Repo: <https://github.com/peopleworks/SqlSchemaDiff>
 Licensed under the [MIT License](LICENSE).
 
 <p align="center">
-  <sub><b>SQLDiff</b> • SQL Server schema sync for real-world deployments</sub>
+  <sub><b>SQLDiff</b> • SQL Server schema sync for real-world deployments</sub><br>
+  <sub><b>PeopleWorks SQL tools</b> — <b>SQLDiff</b> moves the schema ·
+  <a href="https://github.com/peopleworks/SyncJob">SyncJob</a> moves the data</sub>
 </p>

@@ -4,6 +4,41 @@ All notable changes to SQLDiff are recorded here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-08-21
+
+### Added
+
+- **`--include` and `--exclude` to narrow a comparison.** A pattern is `[type:]glob`,
+  where the type is `table`, `view`, `proc` or `func`, and the glob takes `*` and `?`
+  and matches either `schema.name` or the bare name; separate several with commas.
+  Filters apply to **both** snapshots, so a skipped object is never created, altered
+  **or dropped** — filtering only the source would leave it looking target-only, and a
+  run with `--include-drops` would then delete the very thing the filter was meant to
+  protect. A filtered run announces itself, so a narrowed comparison cannot be mistaken
+  for a clean one.
+- A [Related projects](README.md#related-projects) section pairing SQLDiff with
+  [SyncJob](https://github.com/peopleworks/syncjob), which synchronises the data where
+  SQLDiff synchronises the structure.
+- A README section answering the recurring complaints about SSMS Schema Compare,
+  including the one gap SQLDiff shares: ignore rules are per object, not per property.
+
+### Fixed
+
+- **`GO` inside a block comment, a string literal or a bracketed identifier split the
+  batch.** Batches were found with a per-line regular expression, so a header comment
+  carrying a change history — a `GO` on its own line inside `/* ... */` — was cut in
+  half and both pieces failed with *"Missing end comment mark '*/'"*. `GO` is a client
+  convention rather than T-SQL, so the splitter now scans the script properly: nested
+  block comments, line comments, `'...'` with doubled-quote escapes, `"..."` and `[...]`
+  are all understood, and `GO` separates only when it stands alone on an ordinary line.
+  `GO 5` now repeats the batch instead of being read as script text.
+
+### Performance
+
+- Measured on a database matching the shape people report as slow elsewhere — 50 tables,
+  100 indexes, 20 views, 100 procedures, 10 functions — a full comparison completes in
+  **about one second**.
+
 ## [1.3.0] - 2026-08-21
 
 An audit pass ahead of the first public release. Every fix below was reproduced
@@ -129,6 +164,7 @@ Initial release.
 - Connection verification (`check-conn`).
 - Drift detection (`drift`) with exit code 2.
 
+[1.4.0]: https://github.com/peopleworks/SqlSchemaDiff/releases/tag/v1.4.0
 [1.3.0]: https://github.com/peopleworks/SqlSchemaDiff/releases/tag/v1.3.0
 [1.2.0]: https://github.com/peopleworks/SqlSchemaDiff/releases/tag/v1.2.0
 [1.1.0]: https://github.com/peopleworks/SqlSchemaDiff/releases/tag/v1.1.0
