@@ -68,4 +68,5 @@ Two things to watch, because they have both caused real bugs here:
 ## Code of conduct
 
 Be decent to each other. Harassment or personal attacks are not welcome, and I will
-close threads that go that way.
+close threads that go that way. The full terms, and how to report an incident, are
+in [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).

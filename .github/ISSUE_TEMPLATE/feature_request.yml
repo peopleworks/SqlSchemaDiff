@@ -1,0 +1,52 @@
+name: Feature request
+description: Something SQLDiff should be able to compare, render, or apply
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The most useful proposals describe a **real schema** that is hard to handle today,
+        not just the feature in the abstract. If you are proposing support for a new object
+        type, the shape of that work is described in
+        [CONTRIBUTING.md](https://github.com/peopleworks/SqlSchemaDiff/blob/main/CONTRIBUTING.md#adding-support-for-a-new-object-type).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to compare or deploy, and where does SQLDiff get in the way?
+      placeholder: >
+        Our release scripts create sequences, so every comparison against a freshly
+        restored database reports a clean diff while the sequences are actually missing.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: A command, an option, or a behavior. A sketch of the syntax or the rendered SQL helps.
+      render: sql
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which area
+      options:
+        - A new object type (sequence, trigger, synonym, table type, ...)
+        - Extraction
+        - Rendering the script
+        - Comparison rules
+        - Apply, sync, or deploy
+        - Drift detection and CI
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do today
+      description: The workaround, if you have one — it often shapes the right design.

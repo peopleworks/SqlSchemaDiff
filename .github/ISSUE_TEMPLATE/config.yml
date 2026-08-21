@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/peopleworks/SqlSchemaDiff/security/advisories/new
+    about: Report it privately, never in a public issue
+  - name: Handling credentials
+    url: https://github.com/peopleworks/SqlSchemaDiff/blob/main/SECURITY.md#handling-credentials
+    about: A password on the command line is not private — here are the three alternatives
+  - name: Contributing guide
+    url: https://github.com/peopleworks/SqlSchemaDiff/blob/main/CONTRIBUTING.md
+    about: How to build, how to report a schema bug, and how to add a new object type

@@ -1,0 +1,95 @@
+name: Bug report
+description: A wrong script, a missed difference, or a crash
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The useful bug report for a schema tool is a **reproduction in SQL**: the `CREATE`
+        statements for source and target, the command you ran, and the script or error you
+        got. That turns straight into a regression test, which is how most of
+        `tests/RegressionTests.cs` was written.
+
+        ⚠️ **Never paste a connection string, a password, or production object definitions
+        you cannot share.** Reduce the problem to the smallest `CREATE` that still shows it.
+        For a security vulnerability, use the
+        [security policy](https://github.com/peopleworks/SqlSchemaDiff/security/policy)
+        instead of a public issue.
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction in SQL
+      description: The source and target definitions, reduced as far as they still reproduce it.
+      render: sql
+      placeholder: |
+        -- source
+        CREATE TABLE dbo.T (Id int NOT NULL, Sku varchar(60) NOT NULL);
+        -- target
+        CREATE TABLE dbo.T (Id int NOT NULL, Sku varchar(20) NOT NULL);
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: The exact command, with the connection string redacted or replaced by a file/env reference.
+      render: shell
+      placeholder: sqldiff diff --source-snapshot ./src.json --target-snapshot ./tgt.json --out ./change.sql
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: What you expected, and what you got
+      description: Paste the generated script or the error verbatim.
+      render: text
+      placeholder: |
+        Expected: ALTER TABLE dbo.T ALTER COLUMN Sku varchar(60) NOT NULL
+        Actual:   Msg 8115, Arithmetic overflow ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: command_kind
+    attributes:
+      label: Which command
+      options:
+        - diff
+        - extract
+        - apply
+        - sync
+        - deploy
+        - drift
+        - other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: sqldiff --version
+      placeholder: '1.4.0'
+    validations:
+      required: true
+
+  - type: input
+    id: sqlserver
+    attributes:
+      label: SQL Server version
+      description: The output of `SELECT @@VERSION`, or just the major version and edition.
+      placeholder: 'SQL Server 2019 Developer'
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: This is not a security vulnerability
+          required: true
+        - label: No connection strings, passwords, or unshareable production definitions are included
+          required: true
