@@ -4,6 +4,43 @@ All notable changes to SQLDiff are recorded here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-08-29
+
+### Added
+
+- **`SqlSchemaDiff.Core`, the engine as a package.** Schema extraction, comparison and
+  `ALTER` generation now live in a library of their own, published alongside the tool so
+  that other programs share one implementation instead of copying it.
+
+  ```bash
+  dotnet add package SqlSchemaDiff.Core
+  ```
+
+  This is not housekeeping. The engine had been copied into `MSSQLMCPServer`, and the
+  copies drifted: that one still compares a table by normalising its `CREATE` text, so
+  when a table differs it can only warn or `DROP` and `CREATE` it, while this repo had
+  moved on to `TableDiffer` and column-level `ALTER TABLE` that preserves the rows.
+  Measured before the split — `SqlServerSchemaExtractor` 668 lines here against 772
+  there with roughly 900 differing lines, `SchemaDiffer` 410 against 301. **The copy an
+  AI agent calls through MCP was the one that had lost the data-preserving behaviour the
+  tool exists for.**
+
+### Changed
+
+- The CLI package is now **`SqlSchemaDiff.Cli`**, matching the `Core` / `Cli` / `Mcp`
+  convention already used by the other PeopleWorks packages on NuGet. The command it
+  installs is still `sqldiff`, and the tool package still bundles everything it needs.
+
+  ```bash
+  dotnet tool install --global SqlSchemaDiff.Cli
+  ```
+
+- `Models/` and `Services/` moved to `SqlSchemaDiff.Core/`. Nothing was rewritten: the
+  namespaces stay `SqlSchemaDiff.Models` and `SqlSchemaDiff.Services`, git recorded the
+  19 files as renames, and the 90 tests pass unchanged. The CLI keeps only `Program.cs`.
+
+- Release and CI pack both packages; a release pushes both.
+
 ## [1.4.0] - 2026-08-21
 
 ### Added

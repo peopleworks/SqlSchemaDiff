@@ -122,7 +122,7 @@ dotnet bin/Release/net9.0/sqldiff.dll --help
 publishes it when a `NUGET_API_KEY` secret is present:
 
 ```bash
-dotnet tool install --global SqlSchemaDiff   # installs the `sqldiff` command
+dotnet tool install --global SqlSchemaDiff.Cli   # installs the `sqldiff` command
 ```
 
 Runs on Windows, Linux and macOS. Works against **SQL Server 2016 and newer**, any
@@ -131,12 +131,12 @@ edition — Developer, Express and Azure SQL included.
 ### Or use the engine as a library
 
 The CLI is a thin wrapper over
-[**PeopleWorks.SchemaEngine**](SqlSchemaDiff.Engine/README.md) — the extraction, comparison
+[**SqlSchemaDiff.Core**](SqlSchemaDiff.Core/README.md) — the extraction, comparison
 and `ALTER` generation live there, and the package is published alongside the tool so other
 programs can share one implementation instead of copying it.
 
 ```bash
-dotnet add package PeopleWorks.SchemaEngine
+dotnet add package SqlSchemaDiff.Core
 ```
 
 ```csharp

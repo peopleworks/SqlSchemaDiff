@@ -44,7 +44,7 @@ jobs:
         run: dotnet pack SqlSchemaDiff.csproj -c Release -o ./artifacts
 
       - name: Pack the engine library
-        run: dotnet pack SqlSchemaDiff.Engine/PeopleWorks.SchemaEngine.csproj -c Release -o ./artifacts
+        run: dotnet pack SqlSchemaDiff.Core/SqlSchemaDiff.Core.csproj -c Release -o ./artifacts
 
       - name: Zip the executables
         shell: pwsh

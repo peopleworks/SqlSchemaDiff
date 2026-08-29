@@ -1,4 +1,4 @@
-# PeopleWorks.SchemaEngine
+# SqlSchemaDiff.Core
 
 The SQL Server schema engine behind [SQLDiff](https://github.com/peopleworks/SqlSchemaDiff),
 packaged as a library so that every tool that needs it shares **one** implementation.
@@ -19,7 +19,7 @@ One package, one behaviour, one place to fix a bug.
 ## Install
 
 ```bash
-dotnet add package PeopleWorks.SchemaEngine
+dotnet add package SqlSchemaDiff.Core
 ```
 
 ## Using it
@@ -72,7 +72,7 @@ Nothing is dropped unless asked. An object that exists only on the target is rep
 whole tables needs `includeTableDrops` on top of that. A table that cannot be reconciled with
 `ALTER` alone is refused unless `allowTableRebuild` is set.
 
-The namespaces are `SqlSchemaDiff.*` rather than `PeopleWorks.SchemaEngine.*`: this is
-SQLDiff's engine, and renaming them would churn every consumer for no functional gain.
+The namespaces are `SqlSchemaDiff.*`, matching the package: `SqlSchemaDiff.Models` and
+`SqlSchemaDiff.Services`.
 
 MIT licensed. Built by [PeopleWorks](https://github.com/peopleworks).

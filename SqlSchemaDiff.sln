@@ -7,9 +7,7 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "SqlSchemaDiff", "SqlSchemaD
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "SqlSchemaDiff.Tests", "tests\SqlSchemaDiff.Tests\SqlSchemaDiff.Tests.csproj", "{D8D49135-385F-52B9-B598-B15AF137379B}"
 EndProject
-Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "SqlSchemaDiff.Engine", "SqlSchemaDiff.Engine", "{E1FB59A4-C84C-BA53-EBDC-FE0FD57F6934}"
-EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PeopleWorks.SchemaEngine", "SqlSchemaDiff.Engine\PeopleWorks.SchemaEngine.csproj", "{B51ABADF-1326-410A-B34B-E75C059D04D0}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlSchemaDiff.Core", "SqlSchemaDiff.Core\SqlSchemaDiff.Core.csproj", "{0D4AE2E3-87F1-4821-87C8-99F71C4B9798}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -45,24 +43,21 @@ Global
 		{D8D49135-385F-52B9-B598-B15AF137379B}.Release|x64.Build.0 = Release|Any CPU
 		{D8D49135-385F-52B9-B598-B15AF137379B}.Release|x86.ActiveCfg = Release|Any CPU
 		{D8D49135-385F-52B9-B598-B15AF137379B}.Release|x86.Build.0 = Release|Any CPU
-		{B51ABADF-1326-410A-B34B-E75C059D04D0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{B51ABADF-1326-410A-B34B-E75C059D04D0}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{B51ABADF-1326-410A-B34B-E75C059D04D0}.Debug|x64.ActiveCfg = Debug|Any CPU
-		{B51ABADF-1326-410A-B34B-E75C059D04D0}.Debug|x64.Build.0 = Debug|Any CPU
-		{B51ABADF-1326-410A-B34B-E75C059D04D0}.Debug|x86.ActiveCfg = Debug|Any CPU
-		{B51ABADF-1326-410A-B34B-E75C059D04D0}.Debug|x86.Build.0 = Debug|Any CPU
-		{B51ABADF-1326-410A-B34B-E75C059D04D0}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{B51ABADF-1326-410A-B34B-E75C059D04D0}.Release|Any CPU.Build.0 = Release|Any CPU
-		{B51ABADF-1326-410A-B34B-E75C059D04D0}.Release|x64.ActiveCfg = Release|Any CPU
-		{B51ABADF-1326-410A-B34B-E75C059D04D0}.Release|x64.Build.0 = Release|Any CPU
-		{B51ABADF-1326-410A-B34B-E75C059D04D0}.Release|x86.ActiveCfg = Release|Any CPU
-		{B51ABADF-1326-410A-B34B-E75C059D04D0}.Release|x86.Build.0 = Release|Any CPU
+		{0D4AE2E3-87F1-4821-87C8-99F71C4B9798}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0D4AE2E3-87F1-4821-87C8-99F71C4B9798}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0D4AE2E3-87F1-4821-87C8-99F71C4B9798}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{0D4AE2E3-87F1-4821-87C8-99F71C4B9798}.Debug|x64.Build.0 = Debug|Any CPU
+		{0D4AE2E3-87F1-4821-87C8-99F71C4B9798}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{0D4AE2E3-87F1-4821-87C8-99F71C4B9798}.Debug|x86.Build.0 = Debug|Any CPU
+		{0D4AE2E3-87F1-4821-87C8-99F71C4B9798}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0D4AE2E3-87F1-4821-87C8-99F71C4B9798}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0D4AE2E3-87F1-4821-87C8-99F71C4B9798}.Release|x64.ActiveCfg = Release|Any CPU
+		{0D4AE2E3-87F1-4821-87C8-99F71C4B9798}.Release|x64.Build.0 = Release|Any CPU
+		{0D4AE2E3-87F1-4821-87C8-99F71C4B9798}.Release|x86.ActiveCfg = Release|Any CPU
+		{0D4AE2E3-87F1-4821-87C8-99F71C4B9798}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
-	EndGlobalSection
-	GlobalSection(NestedProjects) = preSolution
-		{B51ABADF-1326-410A-B34B-E75C059D04D0} = {E1FB59A4-C84C-BA53-EBDC-FE0FD57F6934}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {34E43E01-1347-55F1-9EA8-36846FD4CF66}

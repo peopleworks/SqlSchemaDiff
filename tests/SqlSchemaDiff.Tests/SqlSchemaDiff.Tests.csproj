@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
@@ -19,7 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\SqlSchemaDiff.Engine\PeopleWorks.SchemaEngine.csproj" />
+    <ProjectReference Include="..\..\SqlSchemaDiff.Core\SqlSchemaDiff.Core.csproj" />
   </ItemGroup>
 
 </Project>
