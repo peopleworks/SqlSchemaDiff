@@ -32,18 +32,19 @@
     <None Include="README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
+  <!-- The engine is a package of its own; the CLI is a wrapper over it.
+       Microsoft.Data.SqlClient arrives transitively - Program.cs never touches it. -->
   <ItemGroup>
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.2" />
+    <ProjectReference Include="SqlSchemaDiff.Engine\PeopleWorks.SchemaEngine.csproj" />
   </ItemGroup>
 
-  <!-- The test project lives under tests/; keep it out of the CLI build. -->
+  <!-- Both live under this directory, so the default glob would compile them
+       into the CLI as well. The engine is referenced, not recompiled. -->
   <ItemGroup>
     <Compile Remove="tests/**/*.cs" />
     <None Remove="tests/**/*" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <InternalsVisibleTo Include="SqlSchemaDiff.Tests" />
+    <Compile Remove="SqlSchemaDiff.Engine/**/*.cs" />
+    <None Remove="SqlSchemaDiff.Engine/**/*" />
   </ItemGroup>
 
 </Project>

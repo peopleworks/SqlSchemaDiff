@@ -128,6 +128,26 @@ dotnet tool install --global SqlSchemaDiff   # installs the `sqldiff` command
 Runs on Windows, Linux and macOS. Works against **SQL Server 2016 and newer**, any
 edition — Developer, Express and Azure SQL included.
 
+### Or use the engine as a library
+
+The CLI is a thin wrapper over
+[**PeopleWorks.SchemaEngine**](SqlSchemaDiff.Engine/README.md) — the extraction, comparison
+and `ALTER` generation live there, and the package is published alongside the tool so other
+programs can share one implementation instead of copying it.
+
+```bash
+dotnet add package PeopleWorks.SchemaEngine
+```
+
+```csharp
+var extractor = new SqlServerSchemaExtractor();
+var diff = new SchemaDiffer().Diff(
+    await extractor.ExtractAsync(sourceConn, ct),
+    await extractor.ExtractAsync(targetConn, ct),
+    includeDrops: false, includeTableDrops: false,
+    allowTableRebuild: false, addOnly: false);
+```
+
 ## The commands
 
 | Command | What it does |
