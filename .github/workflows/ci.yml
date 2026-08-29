@@ -122,3 +122,23 @@ jobs:
           $SQLDIFF drift \
             --source-conn "$BASE;Database=SqlDiffSrc" \
             --target-conn "$BASE;Database=SqlDiffDst"
+
+  docs:
+    name: pocket guide assets
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # GitHub Pages serves docs/ as the site root, so the guide cannot point at
+      # ../assets/hero.svg: it carries its own copy of the figure. If the two
+      # copies drift apart, the README and the guide show different pictures and
+      # nobody notices until someone compares them by eye.
+      - name: docs/hero.svg matches assets/hero.svg
+        run: |
+          if ! cmp -s assets/hero.svg docs/hero.svg; then
+            echo "::error::docs/hero.svg drifted from assets/hero.svg. Fix it with: cp assets/hero.svg docs/hero.svg"
+            diff -u assets/hero.svg docs/hero.svg || true
+            exit 1
+          fi
+          echo "docs/hero.svg is in sync."
