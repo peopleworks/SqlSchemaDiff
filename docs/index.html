@@ -1,0 +1,705 @@
+<!doctype html>
+<html lang="es" data-lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SQLDiff Pocket Guide</title>
+<meta name="description" content="Command pocket guide for PeopleWorks SQLDiff — compare two SQL Server databases and generate the migration script that makes one match the other, without dropping your tables.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23FDF6EC'/><g fill='none' stroke='%23CC2927' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'><path d='M7 11h13M16 7l4 4-4 4'/></g><g fill='none' stroke='%231E293B' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'><path d='M25 21H12M16 17l-4 4 4 4'/></g></svg>">
+<style>
+:root{
+  --bg:#FDF6EC; --panel:#FFFDF8; --panel2:#FBF3E6; --raise:#F5E9D5;
+  --line:#E7DCC9; --line2:#D9CBB3;
+  --tx:#1E293B; --mu:#6B7280; --mu2:#78716C;
+  --rd:#CC2927; --rd2:#B91C1C; --am:#B45309; --am2:#92400E;
+  --gr:#15803D; --bl:#1D4ED8;
+  --code:#1E293B; --codetx:#E2E8F0;
+  --mono:"Cascadia Mono",ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",Menlo,monospace;
+  --sans:"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --wrap:1120px;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:132px}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.6 var(--sans);-webkit-font-smoothing:antialiased}
+[data-lang="es"] .en{display:none}
+[data-lang="en"] .es{display:none}
+a{color:var(--rd2);text-decoration:none}
+a:hover{text-decoration:underline}
+code{font-family:var(--mono)}
+.wrap{max-width:var(--wrap);margin:0 auto;padding:0 20px}
+
+/* ---------- header ---------- */
+header{position:sticky;top:0;z-index:50;background:rgba(253,246,236,.94);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.bar{display:flex;align-items:center;gap:16px;padding:14px 0;flex-wrap:wrap}
+.brand{display:flex;align-items:baseline;gap:10px;margin-right:auto;min-width:0}
+.brand b{font-size:19px;letter-spacing:-.2px}
+.brand span{font-family:var(--mono);font-size:12px;color:var(--rd2);border:1px solid #E8BDBB;background:#FCECEB;padding:3px 9px;border-radius:20px;white-space:nowrap}
+.tools{display:flex;align-items:center;gap:8px}
+.seg{display:flex;border:1px solid var(--line2);border-radius:20px;overflow:hidden;background:var(--panel)}
+.seg button{font:600 12px/1 var(--sans);letter-spacing:.6px;color:var(--mu);background:none;border:0;padding:8px 13px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--rd);color:#FFFDF8}
+.ghost{display:inline-flex;align-items:center;gap:7px;font:600 12.5px/1 var(--sans);color:var(--mu);border:1px solid var(--line2);background:var(--panel);padding:8px 13px;border-radius:20px}
+.ghost:hover{color:var(--tx);border-color:#B9A688;text-decoration:none}
+.ghost svg{width:15px;height:15px;fill:currentColor}
+nav.jump{border-top:1px solid var(--line);overflow-x:auto;scrollbar-width:thin}
+nav.jump ul{display:flex;gap:4px;list-style:none;margin:0;padding:9px 0;white-space:nowrap}
+nav.jump a{font-family:var(--mono);font-size:12.5px;color:var(--mu);padding:6px 11px;border-radius:7px;display:block}
+nav.jump a:hover{background:var(--raise);color:var(--tx);text-decoration:none}
+
+/* ---------- hero band ---------- */
+.hero{border-bottom:1px solid var(--line);background:
+   radial-gradient(900px 220px at 12% -40%,rgba(204,41,39,.10),transparent 70%),
+   radial-gradient(700px 200px at 78% -50%,rgba(180,83,9,.10),transparent 70%)}
+.hero .wrap{padding-top:44px;padding-bottom:40px}
+.hero h1{font-size:clamp(28px,4.4vw,42px);line-height:1.12;margin:0 0 12px;letter-spacing:-.7px}
+.hero h1 em{font-style:normal;color:var(--rd)}
+.hero p.lead{color:var(--mu);max-width:64ch;margin:0 0 22px;font-size:17px}
+.rail{display:flex;align-items:center;gap:9px;flex-wrap:wrap;font-family:var(--mono);font-size:12.5px}
+.rail i{font-style:normal;border:1px solid var(--line2);background:var(--panel);padding:6px 11px;border-radius:8px;color:var(--mu2)}
+.rail i.on{border-color:#E8BDBB;background:#FCECEB;color:var(--rd2)}
+.rail i.hot{border-color:#E3C08A;background:#FBF0DA;color:var(--am2)}
+.rail s{color:#B9A688;text-decoration:none}
+.note{margin-top:22px;display:flex;gap:11px;align-items:flex-start;border:1px solid #BFD3F5;background:#EDF3FE;border-radius:11px;padding:12px 15px;font-size:14px;color:#1E40AF;max-width:70ch}
+.note svg{width:17px;height:17px;fill:currentColor;flex:none;margin-top:2px}
+
+/* ---------- sections ---------- */
+main{padding:8px 0 20px}
+section{margin:44px 0 0}
+.head{display:flex;align-items:center;gap:12px;margin:0 0 6px}
+.head .n{font-family:var(--mono);font-size:12px;color:#B9A688;border:1px solid var(--line2);border-radius:7px;padding:4px 8px;flex:none}
+h2{font-size:23px;margin:0;letter-spacing:-.3px}
+.sub{color:var(--mu);margin:0 0 20px 46px;font-size:15px;max-width:72ch}
+@media(max-width:640px){.sub{margin-left:0}}
+
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px;margin-bottom:14px}
+.card>h3{margin:0 0 4px;font-size:15px;letter-spacing:.2px}
+.card>h3 code{font-size:14.5px;color:var(--rd2)}
+.card>p{margin:0 0 14px;color:var(--mu);font-size:14.5px}
+.card>p:last-child{margin-bottom:0}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(330px,1fr))}
+
+/* ---------- command block ---------- */
+.cmd{position:relative;background:var(--code);border:1px solid #0F172A;border-radius:10px;margin:0 0 12px}
+.cmd:last-child{margin-bottom:0}
+.cmd pre{margin:0;padding:14px 46px 14px 15px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.75;color:var(--codetx)}
+.cmd .k{color:#F8B4B2}
+.cmd .o{color:#FCD34D}
+.cmd .v{color:#86EFAC}
+.cmd .c{color:#94A3B8}
+.cmd button{position:absolute;top:8px;right:8px;width:30px;height:30px;display:grid;place-items:center;background:#334155;border:1px solid #475569;border-radius:7px;color:#CBD5E1;cursor:pointer;opacity:0;transition:opacity .14s}
+.cmd:hover button,.cmd button:focus-visible{opacity:1}
+.cmd button:hover{color:#FCA5A5;border-color:#7F1D1D}
+.cmd button svg{width:14px;height:14px;fill:currentColor}
+.cmd button.done{color:#86EFAC;border-color:#166534;opacity:1}
+
+/* ---------- tables ---------- */
+.tbl{overflow-x:auto;border:1px solid var(--line);border-radius:11px;background:var(--panel)}
+table{border-collapse:collapse;width:100%;font-size:14px;min-width:520px}
+th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--line)}
+th{background:var(--raise);color:var(--mu2);font:700 11.5px/1.4 var(--sans);letter-spacing:1.1px;text-transform:uppercase;white-space:nowrap}
+tr:last-child td{border-bottom:0}
+td code{font-size:13px;color:var(--rd2);white-space:nowrap}
+td:first-child{white-space:nowrap}
+.eng{font-family:var(--mono);font-size:11.5px;color:var(--mu)}
+
+/* ---------- callouts ---------- */
+.warn{display:flex;gap:11px;align-items:flex-start;border-radius:11px;padding:12px 15px;font-size:14px;margin:0 0 14px;border:1px solid}
+.warn:last-child{margin-bottom:0}
+.warn svg{width:17px;height:17px;fill:currentColor;flex:none;margin-top:2px}
+.warn.d{border-color:#E8BDBB;background:#FCECEB;color:#991B1B}
+.warn.a{border-color:#E3C08A;background:#FBF0DA;color:var(--am2)}
+.warn.g{border-color:#A7D8B8;background:#E8F6ED;color:#166534}
+
+/* ---------- misc ---------- */
+.kv{display:grid;grid-template-columns:auto 1fr;gap:8px 16px;font-size:14px;margin:0}
+.kv dt{font-family:var(--mono);font-size:13px;color:var(--am)}
+.kv dd{margin:0;color:var(--mu)}
+.figure{margin:0 0 14px;border:1px solid var(--line);border-radius:14px;background:var(--panel);padding:10px}
+.figure img{display:block;width:100%;height:auto;border-radius:8px}
+.figure figcaption{color:var(--mu);font-size:13px;padding:10px 8px 4px;text-align:center}
+footer{border-top:1px solid var(--line);margin-top:56px;padding:32px 0 46px;color:var(--mu);font-size:14px}
+footer .fl{display:flex;gap:20px;flex-wrap:wrap;align-items:center;justify-content:space-between}
+footer b{color:var(--tx)}
+.up{position:fixed;right:20px;bottom:20px;width:40px;height:40px;display:grid;place-items:center;background:var(--panel);border:1px solid var(--line2);border-radius:11px;color:var(--mu);opacity:0;pointer-events:none;transition:opacity .2s}
+.up.show{opacity:1;pointer-events:auto}
+.up:hover{color:var(--rd2);border-color:#E8BDBB;text-decoration:none}
+.up svg{width:16px;height:16px;fill:currentColor}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap bar">
+    <div class="brand">
+      <b>SQLDiff</b>
+      <span class="es">Guía de bolsillo</span><span class="en">Pocket Guide</span>
+    </div>
+    <div class="tools">
+      <div class="seg" role="group" aria-label="Language">
+        <button type="button" data-set="es" aria-pressed="true">ES</button>
+        <button type="button" data-set="en" aria-pressed="false">EN</button>
+      </div>
+      <a class="ghost" href="https://github.com/peopleworks/SqlSchemaDiff">
+        <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        <span>GitHub</span>
+      </a>
+    </div>
+  </div>
+  <nav class="jump"><div class="wrap"><ul>
+    <li><a href="#install"><span class="es">Instalación</span><span class="en">Install</span></a></li>
+    <li><a href="#conn"><span class="es">Conexiones</span><span class="en">Connections</span></a></li>
+    <li><a href="#start"><span class="es">Inicio rápido</span><span class="en">Quick start</span></a></li>
+    <li><a href="#commands"><span class="es">Comandos</span><span class="en">Commands</span></a></li>
+    <li><a href="#filters"><span class="es">Filtros</span><span class="en">Filters</span></a></li>
+    <li><a href="#snapshots">Snapshots</a></li>
+    <li><a href="#safety"><span class="es">Seguridad</span><span class="en">Safety</span></a></li>
+    <li><a href="#ci">Drift · CI</a></li>
+    <li><a href="#syncjob">SyncJob</a></li>
+    <li><a href="#cheat"><span class="es">Chuleta</span><span class="en">Cheat sheet</span></a></li>
+  </ul></div></nav>
+</header>
+
+<div class="hero"><div class="wrap">
+  <h1>
+    <span class="es">Cambia la forma, <em>conserva las filas</em></span>
+    <span class="en">Change the shape, <em>keep the rows</em></span>
+  </h1>
+  <p class="lead es">Todos los comandos de <code>sqldiff</code> en una página. Compara dos bases de
+    SQL Server y escribe el script de migración que lleva una a la forma de la otra — sin borrar
+    tus tablas.</p>
+  <p class="lead en">Every <code>sqldiff</code> command on one page. Compare two SQL Server databases
+    and write the migration script that brings one to the shape of the other — without dropping
+    your tables.</p>
+
+  <div class="rail">
+    <i>check-conn</i><s>→</s><i class="on">diff</i><s>→</s><i class="hot"><span class="es">leer el .sql</span><span class="en">read the .sql</span></i>
+    <s>→</s><i>apply</i><s>|</s><i>deploy</i><s>|</s><i>drift <span style="opacity:.7">→ exit 2</span></i>
+  </div>
+
+  <div class="note">
+    <svg viewBox="0 0 16 16"><path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm9 3a1 1 0 1 1-2 0 1 1 0 0 1 2 0ZM8 4a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 8 4Z"/></svg>
+    <div>
+      <span class="es"><b>El script generado es el producto.</b> <code>diff</code> nunca toca el
+        destino: escribe un archivo. Léelo, mételo en un pull request, dáselo a un DBA.</span>
+      <span class="en"><b>The generated script is the product.</b> <code>diff</code> never touches the
+        target — it writes a file. Read it, put it in a pull request, hand it to a DBA.</span>
+    </div>
+  </div>
+</div></div>
+
+<main class="wrap">
+
+<!-- 1 INSTALL -->
+<section id="install">
+  <div class="head"><span class="n">01</span><h2><span class="es">Instalación</span><span class="en">Install</span></h2></div>
+  <p class="sub es">Binario autocontenido, herramienta global de .NET, o compilar. Corre en Windows, Linux y macOS, contra SQL Server 2016 o superior — cualquier edición, Azure SQL incluida.</p>
+  <p class="sub en">Self-contained binary, .NET global tool, or a build. Runs on Windows, Linux and macOS, against SQL Server 2016 or newer — any edition, Azure SQL included.</p>
+
+  <div class="grid">
+    <div class="card">
+      <h3><span class="es">Binario o herramienta</span><span class="en">Binary or tool</span></h3>
+      <div class="cmd"><pre><code><span class="c"># <span class="es">herramienta global: instala el comando `sqldiff`</span><span class="en">global tool: installs the `sqldiff` command</span></span>
+<span class="k">dotnet</span> tool install <span class="o">--global</span> <span class="v">SqlSchemaDiff</span>
+
+<span class="k">sqldiff</span> <span class="o">--version</span>
+<span class="k">sqldiff</span> <span class="o">--help</span></code></pre></div>
+      <p class="es">O baja el binario autocontenido para Windows o Linux desde
+        <a href="https://github.com/peopleworks/SqlSchemaDiff/releases">Releases ↗</a>: no hay runtime
+        que instalar al lado, viene incluido.</p>
+      <p class="en">Or download the self-contained binary for Windows or Linux from
+        <a href="https://github.com/peopleworks/SqlSchemaDiff/releases">Releases ↗</a>: nothing to
+        install alongside it, the runtime is bundled.</p>
+    </div>
+
+    <div class="card">
+      <h3><span class="es">Compilar desde el código</span><span class="en">Build from source</span></h3>
+      <div class="cmd"><pre><code><span class="k">git</span> clone https://github.com/peopleworks/SqlSchemaDiff.git
+<span class="k">cd</span> SqlSchemaDiff
+<span class="k">dotnet</span> build SqlSchemaDiff.csproj <span class="o">-c</span> <span class="v">Release</span>
+<span class="k">dotnet</span> bin/Release/net9.0/sqldiff.dll <span class="o">--help</span></code></pre></div>
+      <dl class="kv">
+        <dt>.NET 9</dt><dd><span class="es">SDK para compilar; el binario del release no lo necesita</span><span class="en">SDK to build; the release binary needs none</span></dd>
+        <dt>SQL Server</dt><dd>2016+ — Developer, Express, Azure SQL</dd>
+        <dt>SO / OS</dt><dd>Windows · Linux · macOS</dd>
+      </dl>
+    </div>
+  </div>
+</section>
+
+<!-- 2 CONNECTIONS -->
+<section id="conn">
+  <div class="head"><span class="n">02</span><h2><span class="es">Conexiones</span><span class="en">Connections</span></h2></div>
+  <p class="sub es">Antes de comparar nada, conviene saber cómo entregar la cadena de conexión sin dejarla escrita en el historial del shell.</p>
+  <p class="sub en">Before comparing anything, it is worth knowing how to hand over the connection string without leaving it in your shell history.</p>
+
+  <div class="warn d">
+    <svg viewBox="0 0 16 16"><path d="M6.46 1.14a1.75 1.75 0 0 1 3.08 0l5.25 9.44A1.75 1.75 0 0 1 13.25 13.2H2.75a1.75 1.75 0 0 1-1.54-2.62ZM8 5a.75.75 0 0 0-.75.75v2.5a.75.75 0 0 0 1.5 0v-2.5A.75.75 0 0 0 8 5Zm0 6a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z"/></svg>
+    <div>
+      <span class="es"><b>Una contraseña escrita como argumento no es privada.</b> Cualquier otro proceso
+        de la máquina puede leer la línea de comandos completa, el shell la escribe en su historial y
+        la mayoría de los runners de CI la hacen eco.</span>
+      <span class="en"><b>A password typed as a command-line argument is not private.</b> Any other
+        process on the machine can read the full command line, your shell writes it to history, and
+        most CI runners echo it.</span>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h3><span class="es">Tres formas más seguras</span><span class="en">Three safer forms</span></h3>
+      <div class="cmd"><pre><code><span class="c"># <span class="es">un archivo cuyos permisos controlas</span><span class="en">a file whose permissions you control</span></span>
+<span class="k">sqldiff</span> <span class="k">extract</span> <span class="o">--conn-file</span> <span class="v">./prod.conn</span>
+
+<span class="c"># <span class="es">indirección por variable nombrada</span><span class="en">indirection through a named variable</span></span>
+<span class="k">sqldiff</span> <span class="k">extract</span> <span class="o">--conn</span> <span class="v">env:MY_CONN</span>
+
+<span class="c"># <span class="es">la variable por defecto</span><span class="en">the default variable</span></span>
+<span class="v">SQLDIFF_CONN</span>=<span class="v">"Server=…"</span> <span class="k">sqldiff</span> <span class="k">extract</span></code></pre></div>
+      <p class="es">Los dos lados tienen las mismas tres formas.</p>
+      <p class="en">Both sides have the same three forms.</p>
+      <div class="tbl"><table style="min-width:0">
+        <thead><tr>
+          <th><span class="es">Lado</span><span class="en">Side</span></th>
+          <th><span class="es">Opciones</span><span class="en">Options</span></th>
+        </tr></thead>
+        <tbody>
+          <tr><td><span class="es">Único</span><span class="en">Single</span></td><td class="eng">--conn · --conn-file · SQLDIFF_CONN</td></tr>
+          <tr><td><span class="es">Origen</span><span class="en">Source</span></td><td class="eng">--source-conn · --source-conn-file · SQLDIFF_SOURCE_CONN</td></tr>
+          <tr><td><span class="es">Destino</span><span class="en">Target</span></td><td class="eng">--target-conn · --target-conn-file · SQLDIFF_TARGET_CONN</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+
+    <div class="card">
+      <h3><span class="es">Verificar antes de comparar</span><span class="en">Verify before comparing</span></h3>
+      <p class="es">Imprime servidor, base, login, versión y edición de cada lado. Es el primer comando
+        que conviene correr en una máquina nueva.</p>
+      <p class="en">Prints server, database, login, version and edition for each side. It is the first
+        command worth running on a new machine.</p>
+      <div class="cmd"><pre><code><span class="k">sqldiff</span> <span class="k">check-conn</span> <span class="o">--source-conn</span> <span class="v">"$DEV"</span> <span class="o">--target-conn</span> <span class="v">"$PROD"</span></code></pre></div>
+
+      <h3 style="margin-top:18px"><span class="es">En Windows, sin contraseña</span><span class="en">On Windows, no password at all</span></h3>
+      <div class="cmd"><pre><code>Server=SQL1;Database=App;<span class="o">Integrated Security</span>=<span class="v">True</span>;
+Encrypt=<span class="v">True</span>;TrustServerCertificate=<span class="v">True</span></code></pre></div>
+      <div class="warn a">
+        <svg viewBox="0 0 16 16"><path d="M6.46 1.14a1.75 1.75 0 0 1 3.08 0l5.25 9.44A1.75 1.75 0 0 1 13.25 13.2H2.75a1.75 1.75 0 0 1-1.54-2.62ZM8 5a.75.75 0 0 0-.75.75v2.5a.75.75 0 0 0 1.5 0v-2.5A.75.75 0 0 0 8 5Zm0 6a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z"/></svg>
+        <div>
+          <span class="es"><code>TrustServerCertificate=True</code> es para servidores internos y de
+            desarrollo. En producción, use un certificado en el que el cliente confíe.</span>
+          <span class="en"><code>TrustServerCertificate=True</code> is for internal and development
+            servers. In production, use a certificate the client trusts.</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 3 QUICK START -->
+<section id="start">
+  <div class="head"><span class="n">03</span><h2><span class="es">Inicio rápido</span><span class="en">Quick start</span></h2></div>
+  <p class="sub es">La secuencia habitual. El paso 3 es el que importa.</p>
+  <p class="sub en">The usual sequence. Step 3 is the one that matters.</p>
+
+  <figure class="figure">
+    <img src="hero.svg" alt="SQLDiff lleva una tabla de tres filas a la forma del origen: agrega una columna Tier y ensancha Email con sentencias ALTER, y las mismas tres filas siguen ahí después.">
+    <figcaption class="es">El destino conserva sus filas. Solo cambia la forma — y el script está antes de que algo corra.</figcaption>
+    <figcaption class="en">The target keeps its rows. Only the shape changes — and you get the script before anything runs.</figcaption>
+  </figure>
+
+  <div class="card">
+    <div class="cmd"><pre><code><span class="c"># 1 · <span class="es">verificar que alcanzas los dos lados</span><span class="en">make sure you can reach both sides</span></span>
+<span class="k">sqldiff</span> <span class="k">check-conn</span> <span class="o">--source-conn</span> <span class="v">"$DEV"</span> <span class="o">--target-conn</span> <span class="v">"$PROD"</span>
+
+<span class="c"># 2 · <span class="es">escribir el script; no se aplica nada</span><span class="en">write the script; nothing is applied</span></span>
+<span class="k">sqldiff</span> <span class="k">diff</span> <span class="o">--source-conn</span> <span class="v">"$DEV"</span> <span class="o">--target-conn</span> <span class="v">"$PROD"</span> <span class="o">--out</span> <span class="v">changes.sql</span>
+
+<span class="c"># 3 · <span class="es">LEER changes.sql. Este es el paso que importa.</span><span class="en">READ changes.sql. This is the step that matters.</span></span>
+
+<span class="c"># 4 · <span class="es">aplicarlo</span><span class="en">apply it</span></span>
+<span class="k">sqldiff</span> <span class="k">apply</span> <span class="o">--conn</span> <span class="v">"$PROD"</span> <span class="o">--script</span> <span class="v">changes.sql</span> <span class="o">--log</span> <span class="v">apply.log</span></code></pre></div>
+    <p class="es">Si prefiere un solo paso, <code>deploy</code> es <code>diff</code> + <code>apply</code>
+      junto, y la aplicación corre en una transacción que revierte entera.</p>
+    <p class="en">If you would rather do it in one step, <code>deploy</code> is <code>diff</code> +
+      <code>apply</code> together, and the apply runs in one transaction that rolls back whole.</p>
+    <div class="cmd"><pre><code><span class="k">sqldiff</span> <span class="k">deploy</span> <span class="o">--source-conn</span> <span class="v">"$DEV"</span> <span class="o">--target-conn</span> <span class="v">"$PROD"</span> <span class="o">--out</span> <span class="v">changes.sql</span></code></pre></div>
+    <div class="warn a">
+      <svg viewBox="0 0 16 16"><path d="M6.46 1.14a1.75 1.75 0 0 1 3.08 0l5.25 9.44A1.75 1.75 0 0 1 13.25 13.2H2.75a1.75 1.75 0 0 1-1.54-2.62ZM8 5a.75.75 0 0 0-.75.75v2.5a.75.75 0 0 0 1.5 0v-2.5A.75.75 0 0 0 8 5Zm0 6a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z"/></svg>
+      <div>
+        <span class="es">Un script generado es un <b>delta para un par concreto de bases</b>, así que no
+          está pensado para reejecutarse: aplicarlo dos veces falla en los objetos que ya creó. Para
+          volver a poner un destino al día, corra <code>diff</code>/<code>deploy</code> otra vez —
+          contra un destino que ya coincide, produce un script vacío y no hace nada.</span>
+        <span class="en">A generated script is a <b>delta for one specific pair of databases</b>, so it
+          is not meant to be re-run: applying it twice fails on the objects it already created. To
+          bring a target up to date again, run <code>diff</code>/<code>deploy</code> again — against a
+          target that already matches, it produces an empty script and does nothing.</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 4 COMMANDS -->
+<section id="commands">
+  <div class="head"><span class="n">04</span><h2><span class="es">Comandos</span><span class="en">Commands</span></h2></div>
+  <p class="sub es">Seis comandos. Tres de ellos escriben en una base; los otros tres solo leen y producen archivos.</p>
+  <p class="sub en">Six commands. Three of them write to a database; the other three only read and produce files.</p>
+
+  <div class="tbl"><table>
+    <thead><tr>
+      <th><span class="es">Comando</span><span class="en">Command</span></th>
+      <th><span class="es">¿Escribe?</span><span class="en">Writes?</span></th>
+      <th><span class="es">Qué hace</span><span class="en">What it does</span></th>
+    </tr></thead>
+    <tbody>
+      <tr><td><code>check-conn</code></td><td class="eng">no</td><td><span class="es">Verifica la conexión e imprime servidor, base, login, versión y edición</span><span class="en">Verifies a connection and prints server, database, login, version and edition</span></td></tr>
+      <tr><td><code>extract</code></td><td class="eng">no</td><td><span class="es">Guiona una base entera a <code>.sql</code>, y opcionalmente un snapshot <code>.json</code></span><span class="en">Scripts a whole database to <code>.sql</code>, and optionally a <code>.json</code> snapshot</span></td></tr>
+      <tr><td><code>diff</code></td><td class="eng">no</td><td><span class="es">Compara origen contra destino y escribe el script. <b>Nunca toca el destino.</b></span><span class="en">Compares source against target and writes the migration script. <b>Never touches the target.</b></span></td></tr>
+      <tr><td><code>drift</code></td><td class="eng">no</td><td><span class="es">Como <code>diff</code>, pero <b>sale con código 2</b> cuando algo difiere. Hecho para CI.</span><span class="en">Like <code>diff</code>, but <b>exits 2</b> when anything differs. Built for CI.</span></td></tr>
+      <tr><td><code>apply</code></td><td class="eng"><b><span class="es">sí</span><span class="en">yes</span></b></td><td><span class="es">Corre un script existente contra una base, en una sola transacción</span><span class="en">Runs an existing script against a database, in one transaction</span></td></tr>
+      <tr><td><code>deploy</code></td><td class="eng"><b><span class="es">sí</span><span class="en">yes</span></b></td><td><span class="es"><code>diff</code> + <code>apply</code> en un paso. <code>sync</code> es lo mismo con <code>--apply</code> explícito.</span><span class="en"><code>diff</code> + <code>apply</code> in one step. <code>sync</code> is the same with an explicit <code>--apply</code>.</span></td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="grid" style="margin-top:14px">
+    <div class="card">
+      <h3><code>extract</code></h3>
+      <div class="cmd"><pre><code><span class="k">sqldiff</span> <span class="k">extract</span> <span class="o">--conn</span> <span class="v">"$DEV"</span> <span class="o">`</span>
+  <span class="o">--out</span> <span class="v">schema.sql</span> <span class="o">`</span>
+  <span class="o">--json</span> <span class="v">schema.snapshot.json</span></code></pre></div>
+      <p class="es"><code>--out</code> por defecto es <code>schema.sql</code>. <code>--json</code> es
+        opcional y es lo que habilita comparar sin las dos bases en línea.</p>
+      <p class="en"><code>--out</code> defaults to <code>schema.sql</code>. <code>--json</code> is
+        optional, and it is what makes comparing without both databases online possible.</p>
+    </div>
+    <div class="card">
+      <h3><code>apply</code></h3>
+      <div class="cmd"><pre><code><span class="k">sqldiff</span> <span class="k">apply</span> <span class="o">--conn</span> <span class="v">"$PROD"</span> <span class="o">`</span>
+  <span class="o">--script</span> <span class="v">changes.sql</span> <span class="o">`</span>
+  <span class="o">--log</span> <span class="v">apply.log</span> <span class="o">`</span>
+  <span class="o">--timeout-seconds</span> <span class="v">600</span></code></pre></div>
+      <p class="es">El timeout por defecto es de 120 segundos por lote. Súbalo si la migración crea
+        índices grandes.</p>
+      <p class="en">The default timeout is 120 seconds per batch. Raise it when the migration builds
+        large indexes.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 5 FILTERS -->
+<section id="filters">
+  <div class="head"><span class="n">05</span><h2><span class="es">Filtros</span><span class="en">Filters</span></h2></div>
+  <p class="sub es">Un patrón es <code>[tipo:]glob</code>, donde el tipo es <code>table</code>, <code>view</code>, <code>proc</code> o <code>func</code>, y el glob acepta <code>*</code> y <code>?</code> contra <code>esquema.nombre</code> o el nombre pelado. Varios se separan con comas.</p>
+  <p class="sub en">A pattern is <code>[type:]glob</code>, where the type is <code>table</code>, <code>view</code>, <code>proc</code> or <code>func</code>, and the glob takes <code>*</code> and <code>?</code> against <code>schema.name</code> or the bare name. Separate several with commas.</p>
+
+  <div class="card">
+    <div class="cmd"><pre><code><span class="k">sqldiff</span> <span class="k">diff</span> … <span class="o">--include</span> <span class="v">"Sales.*"</span>                    <span class="c"># <span class="es">un esquema</span><span class="en">one schema</span></span>
+<span class="k">sqldiff</span> <span class="k">diff</span> … <span class="o">--include</span> <span class="v">"table:"</span>                     <span class="c"># <span class="es">solo tablas</span><span class="en">tables only</span></span>
+<span class="k">sqldiff</span> <span class="k">diff</span> … <span class="o">--exclude</span> <span class="v">"proc:usp_Temp*,dbo.Audit*"</span>  <span class="c"># <span class="es">saltar temporales y auditoría</span><span class="en">skip scratch procs and audit tables</span></span>
+<span class="k">sqldiff</span> <span class="k">diff</span> … <span class="o">--include</span> <span class="v">"dbo.Customer,dbo.Order*"</span>    <span class="c"># <span class="es">un puñado con nombre</span><span class="en">a named handful</span></span></code></pre></div>
+    <div class="warn a">
+      <svg viewBox="0 0 16 16"><path d="M6.46 1.14a1.75 1.75 0 0 1 3.08 0l5.25 9.44A1.75 1.75 0 0 1 13.25 13.2H2.75a1.75 1.75 0 0 1-1.54-2.62ZM8 5a.75.75 0 0 0-.75.75v2.5a.75.75 0 0 0 1.5 0v-2.5A.75.75 0 0 0 8 5Zm0 6a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z"/></svg>
+      <div>
+        <span class="es">Los filtros aplican a <b>los dos lados</b>. Eso importa: filtrar solo el origen
+          dejaría un objeto saltado con aspecto de existir solo en el destino, y una corrida posterior
+          con <code>--include-drops</code> borraría justo lo que pidió dejar en paz.</span>
+        <span class="en">Filters apply to <b>both sides</b>. That matters: filtering only the source
+          would leave a skipped object looking target-only, and a later <code>--include-drops</code>
+          run would delete the very thing you asked it to leave alone.</span>
+      </div>
+    </div>
+    <p class="es">Una corrida filtrada lo dice en la primera línea de su salida, así que una comparación
+      estrechada nunca se confunde con una limpia:</p>
+    <p class="en">A filtered run says so on the first line of its output, so a narrowed comparison is
+      never mistaken for a clean one:</p>
+    <div class="cmd"><pre><code><span class="c">Filtered comparison (include=table:, exclude=dbo.T7); objects
+outside the filter were not compared.</span></code></pre></div>
+  </div>
+</section>
+
+<!-- 6 SNAPSHOTS -->
+<section id="snapshots">
+  <div class="head"><span class="n">06</span><h2>Snapshots</h2></div>
+  <p class="sub es">Comparar sin tener las dos bases en línea al mismo tiempo.</p>
+  <p class="sub en">Comparing without both databases online at the same time.</p>
+
+  <div class="card">
+    <p class="es"><code>extract --json</code> escribe la estructura del origen en un archivo. Cométalo,
+      envíelo, compare contra él más tarde — útil cuando el origen es una máquina de desarrollo y el
+      destino es el servidor de un cliente que alcanza una vez al mes.</p>
+    <p class="en"><code>extract --json</code> writes the source structure to a file. Commit it, ship it,
+      diff against it later — useful when the source is a developer machine and the target is a
+      customer server you reach once a month.</p>
+    <div class="cmd"><pre><code><span class="k">sqldiff</span> <span class="k">extract</span> <span class="o">--conn</span> <span class="v">"$DEV"</span> <span class="o">--out</span> <span class="v">schema.sql</span> <span class="o">--json</span> <span class="v">schema.snapshot.json</span>
+
+<span class="k">sqldiff</span> <span class="k">deploy</span> <span class="o">--source-snapshot</span> <span class="v">schema.snapshot.json</span> <span class="o">`</span>
+  <span class="o">--target-conn</span> <span class="v">"$CUSTOMER"</span> <span class="o">--add-only</span></code></pre></div>
+    <dl class="kv">
+      <dt>--source-snapshot</dt><dd><span class="es">usa un <code>.json</code> como origen en vez de una conexión</span><span class="en">use a <code>.json</code> as the source instead of a connection</span></dd>
+      <dt>--target-snapshot</dt><dd><span class="es">lo mismo del lado del destino</span><span class="en">the same on the target side</span></dd>
+      <dt>--add-only</dt><dd><span class="es">solo agrega lo que falta; no modifica lo existente</span><span class="en">only adds what is missing; leaves existing objects alone</span></dd>
+    </dl>
+  </div>
+</section>
+
+<!-- 7 SAFETY -->
+<section id="safety">
+  <div class="head"><span class="n">07</span><h2><span class="es">Seguridad</span><span class="en">Safety</span></h2></div>
+  <p class="sub es">Esta herramienta escribe DDL contra bases que tienen datos adentro, así que los valores por defecto son conservadores.</p>
+  <p class="sub en">This is a tool that writes DDL against databases with data in them, so the defaults lean conservative.</p>
+
+  <div class="grid">
+    <div class="card">
+      <h3><span class="es">Una transacción</span><span class="en">One transaction</span></h3>
+      <p class="es"><code>apply</code>, <code>sync</code> y <code>deploy</code> corren cada lote en una
+        sola transacción. Si un lote falla, el cambio entero se revierte y el destino queda exactamente
+        como estaba. <code>--no-transaction</code> se sale de eso.</p>
+      <p class="en"><code>apply</code>, <code>sync</code> and <code>deploy</code> run every batch in a
+        single transaction. If any batch fails, the whole change rolls back and the target is left
+        exactly as it was. <code>--no-transaction</code> opts out.</p>
+    </div>
+    <div class="card">
+      <h3><span class="es">Nada se borra si no lo pide</span><span class="en">Nothing is dropped unless you ask</span></h3>
+      <p class="es">Una columna, constraint o índice que solo existe en el destino se reporta como
+        comentario <code>-- WARNING:</code> y se deja en su lugar.</p>
+      <p class="en">A column, constraint or index that exists only on the target is reported as a
+        <code>-- WARNING:</code> comment and left in place.</p>
+      <dl class="kv">
+        <dt>--include-drops</dt><dd><span class="es">habilita borrar esos objetos</span><span class="en">enables dropping those objects</span></dd>
+        <dt>--include-table-drops</dt><dd><span class="es">borrar tablas enteras necesita esto <b>encima</b></span><span class="en">dropping whole tables needs this <b>on top</b></span></dd>
+        <dt>--allow-table-rebuild</dt><dd><span class="es">permite reconstruir una tabla cuando un <code>ALTER</code> no alcanza</span><span class="en">allows rebuilding a table when an <code>ALTER</code> cannot do it</span></dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3><span class="es">Ensayar</span><span class="en">Rehearse</span></h3>
+    <div class="cmd"><pre><code><span class="c"># <span class="es">no escribe: muestra lo que haría</span><span class="en">writes nothing: shows what it would do</span></span>
+<span class="k">sqldiff</span> <span class="k">deploy</span> <span class="o">--source-conn</span> <span class="v">"$DEV"</span> <span class="o">--target-conn</span> <span class="v">"$PROD"</span> <span class="o">--dry-run</span>
+
+<span class="c"># <span class="es">deja constancia de lo aplicado</span><span class="en">leave a record of what was applied</span></span>
+<span class="k">sqldiff</span> <span class="k">apply</span> <span class="o">--conn</span> <span class="v">"$PROD"</span> <span class="o">--script</span> <span class="v">changes.sql</span> <span class="o">--log</span> <span class="v">apply.log</span></code></pre></div>
+    <div class="warn g">
+      <svg viewBox="0 0 16 16"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"/></svg>
+      <div>
+        <span class="es">Los <code>ALTER</code> que emite preservan las filas que ya están ahí. Ese es el
+          punto entero de la herramienta: cambiar la forma sin reconstruir la tabla.</span>
+        <span class="en">The <code>ALTER</code> statements it emits preserve the rows already there.
+          That is the whole point of the tool: change the shape without rebuilding the table.</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 8 CI -->
+<section id="ci">
+  <div class="head"><span class="n">08</span><h2><span class="es">Drift en CI</span><span class="en">Drift in CI</span></h2></div>
+  <p class="sub es"><code>drift</code> sale con <b>2</b> cuando las bases difieren y con <b>0</b> cuando coinciden — así un pipeline puede fallar la build cuando producción divergió en silencio del esquema del repositorio.</p>
+  <p class="sub en"><code>drift</code> exits <b>2</b> when the databases differ and <b>0</b> when they match — so a pipeline can fail the build when production has quietly diverged from the schema in your repository.</p>
+
+  <div class="grid">
+    <div class="card">
+      <h3>GitHub Actions</h3>
+      <div class="cmd"><pre><code><span class="o">- name</span>: <span class="v">Fail if production drifted</span>
+  <span class="o">run</span>: |
+    <span class="k">sqldiff</span> <span class="k">drift</span> \
+      <span class="o">--source-snapshot</span> <span class="v">schema.snapshot.json</span> \
+      <span class="o">--target-conn</span> <span class="v">"$PROD_CONN"</span> \
+      <span class="o">--out</span> <span class="v">drift.sql</span>
+  <span class="o">env</span>:
+    <span class="o">PROD_CONN</span>: <span class="v">${{ secrets.PROD_CONN }}</span></code></pre></div>
+    </div>
+    <div class="card">
+      <h3><span class="es">Códigos de salida</span><span class="en">Exit codes</span></h3>
+      <div class="tbl"><table style="min-width:0"><tbody>
+        <tr><td><code>0</code></td><td><span class="es">Éxito</span><span class="en">Success</span></td></tr>
+        <tr><td><code>1</code></td><td><span class="es">Error — el mensaje va a stderr</span><span class="en">Error — the message is on stderr</span></td></tr>
+        <tr><td><code>2</code></td><td><span class="es">Drift detectado (solo <code>drift</code>)</span><span class="en">Drift detected (<code>drift</code> only)</span></td></tr>
+      </tbody></table></div>
+      <div class="warn a" style="margin-top:14px">
+        <svg viewBox="0 0 16 16"><path d="M6.46 1.14a1.75 1.75 0 0 1 3.08 0l5.25 9.44A1.75 1.75 0 0 1 13.25 13.2H2.75a1.75 1.75 0 0 1-1.54-2.62ZM8 5a.75.75 0 0 0-.75.75v2.5a.75.75 0 0 0 1.5 0v-2.5A.75.75 0 0 0 8 5Zm0 6a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z"/></svg>
+        <div>
+          <span class="es"><code>drift</code> activa <code>--include-drops</code> y
+            <code>--include-table-drops</code> por defecto, porque su trabajo es reportar <i>toda</i>
+            diferencia. El script que escribe es un <b>reporte</b>: no lo canalice a <code>apply</code>
+            sin leerlo.</span>
+          <span class="en"><code>drift</code> enables <code>--include-drops</code> and
+            <code>--include-table-drops</code> by default, because its job is to report <i>every</i>
+            difference. The script it writes is a <b>report</b>; do not pipe it into
+            <code>apply</code> without reading it.</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 9 SYNCJOB -->
+<section id="syncjob">
+  <div class="head"><span class="n">09</span><h2><span class="es">Herramienta hermana — SyncJob</span><span class="en">Companion tool — SyncJob</span></h2></div>
+  <p class="sub es">SQLDiff mueve la <b>estructura</b>. <a href="https://github.com/peopleworks/syncjob">SyncJob</a> mueve los <b>datos</b>. Primero la forma, después las filas.</p>
+  <p class="sub en">SQLDiff moves the <b>structure</b>. <a href="https://github.com/peopleworks/syncjob">SyncJob</a> moves the <b>data</b>. Structure first, then the rows.</p>
+
+  <div class="card">
+    <div class="cmd"><pre><code><span class="c"># <span class="es">la estructura, después las filas</span><span class="en">the structure, then the rows</span></span>
+<span class="k">sqldiff</span> <span class="k">deploy</span> <span class="o">--source-conn</span> <span class="v">"$DEV"</span> <span class="o">--target-conn</span> <span class="v">"$WAREHOUSE"</span>
+<span class="k">SyncJob.exe</span> <span class="k">run</span> <span class="o">-c</span> <span class="v">appsettings.json</span> <span class="o">-s</span> <span class="v">SalesSync</span>
+
+<span class="c"># <span class="es">o poner drift como compuerta delante de la corrida nocturna</span><span class="en">or put drift as a gate in front of the nightly run</span></span>
+<span class="k">sqldiff</span> <span class="k">drift</span> <span class="o">--source</span> <span class="v">"…"</span> <span class="o">--target</span> <span class="v">"…"</span> || <span class="k">exit</span> <span class="v">1</span>
+<span class="k">SyncJob.exe</span> <span class="k">run</span> <span class="o">-c</span> <span class="v">appsettings.json</span> <span class="o">--all</span></code></pre></div>
+    <p class="es">Una carga masiva hacia un destino cuya estructura cambió va a fallar de todos modos —
+      y falla más claramente acá. Verificar la forma cuesta segundos.</p>
+    <p class="en">A bulk load into a destination whose structure has drifted is going to fail anyway —
+      and it fails more clearly here. Checking the shape costs seconds.</p>
+    <p class="es">Las tres herramientas de bases de PeopleWorks:
+      <a href="https://peopleworks.github.io/DBFSync/">guía de DBFSync</a> ·
+      <b>SQLDiff</b> ·
+      <a href="https://peopleworks.github.io/syncjob/">guía de SyncJob</a></p>
+    <p class="en">The three PeopleWorks database tools:
+      <a href="https://peopleworks.github.io/DBFSync/">DBFSync guide</a> ·
+      <b>SQLDiff</b> ·
+      <a href="https://peopleworks.github.io/syncjob/">SyncJob guide</a></p>
+  </div>
+</section>
+
+<!-- 10 CHEAT SHEET -->
+<section id="cheat">
+  <div class="head"><span class="n">10</span><h2><span class="es">Chuleta</span><span class="en">Cheat sheet</span></h2></div>
+  <p class="sub es">Todos los comandos y todas las opciones.</p>
+  <p class="sub en">Every command and every option.</p>
+
+  <div class="tbl"><table>
+    <thead><tr>
+      <th><span class="es">Comando</span><span class="en">Command</span></th>
+      <th>Aliases</th>
+      <th><span class="es">Qué hace</span><span class="en">What it does</span></th>
+    </tr></thead>
+    <tbody>
+      <tr><td><code>sqldiff --help</code></td><td class="eng">-h</td><td><span class="es">Lista de comandos y opciones</span><span class="en">Command and option list</span></td></tr>
+      <tr><td><code>sqldiff --version</code></td><td class="eng">-v</td><td><span class="es">Versión</span><span class="en">Version</span></td></tr>
+      <tr><td><code>check-conn</code></td><td class="eng">check-connection</td><td><span class="es">Verifica una conexión</span><span class="en">Verifies a connection</span></td></tr>
+      <tr><td><code>extract</code></td><td class="eng">—</td><td><span class="es">Guiona una base a <code>.sql</code> / <code>.json</code></span><span class="en">Scripts a database to <code>.sql</code> / <code>.json</code></span></td></tr>
+      <tr><td><code>diff</code></td><td class="eng">—</td><td><span class="es">Escribe el script de migración; no aplica</span><span class="en">Writes the migration script; applies nothing</span></td></tr>
+      <tr><td><code>drift</code></td><td class="eng">—</td><td><span class="es">Como <code>diff</code>; sale con 2 si difieren</span><span class="en">Like <code>diff</code>; exits 2 when they differ</span></td></tr>
+      <tr><td><code>apply</code></td><td class="eng">—</td><td><span class="es">Corre un script en una transacción</span><span class="en">Runs a script in one transaction</span></td></tr>
+      <tr><td><code>deploy</code></td><td class="eng">delta-apply</td><td><code>diff</code> + <code>apply</code></td></tr>
+      <tr><td><code>sync</code></td><td class="eng">—</td><td><span class="es">Igual que <code>deploy</code>, con <code>--apply</code> explícito</span><span class="en">Same as <code>deploy</code>, with an explicit <code>--apply</code></span></td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="tbl" style="margin-top:14px"><table>
+    <thead><tr>
+      <th><span class="es">Opción</span><span class="en">Option</span></th>
+      <th><span class="es">Qué hace</span><span class="en">What it does</span></th>
+    </tr></thead>
+    <tbody>
+      <tr><td><code>--conn</code> · <code>--connection</code></td><td><span class="es">Conexión única. Acepta <code>env:NOMBRE</code></span><span class="en">Single connection. Accepts <code>env:NAME</code></span></td></tr>
+      <tr><td><code>--conn-file</code></td><td><span class="es">Archivo con la cadena de conexión</span><span class="en">File holding the connection string</span></td></tr>
+      <tr><td><code>--source-conn</code> · <code>--target-conn</code></td><td><span class="es">Conexión de cada lado (<code>-conn-file</code> también)</span><span class="en">Each side's connection (<code>-conn-file</code> too)</span></td></tr>
+      <tr><td><code>--source-snapshot</code> · <code>--target-snapshot</code></td><td><span class="es">Usar un <code>.json</code> en vez de una conexión</span><span class="en">Use a <code>.json</code> instead of a connection</span></td></tr>
+      <tr><td><code>--out &lt;PATH&gt;</code></td><td><span class="es">Script de salida. Default <code>schema.sql</code></span><span class="en">Output script. Defaults to <code>schema.sql</code></span></td></tr>
+      <tr><td><code>--json &lt;PATH&gt;</code></td><td><span class="es">Snapshot JSON de <code>extract</code></span><span class="en">JSON snapshot from <code>extract</code></span></td></tr>
+      <tr><td><code>--script &lt;PATH&gt;</code></td><td><span class="es">Script a ejecutar con <code>apply</code></span><span class="en">Script for <code>apply</code> to run</span></td></tr>
+      <tr><td><code>--log &lt;PATH&gt;</code></td><td><span class="es">Bitácora de la aplicación</span><span class="en">Audit log of the apply</span></td></tr>
+      <tr><td><code>--include</code> · <code>--exclude</code></td><td><span class="es">Filtros <code>[tipo:]glob</code>, separados por comas</span><span class="en"><code>[type:]glob</code> filters, comma-separated</span></td></tr>
+      <tr><td><code>--include-drops</code></td><td><span class="es">Permite borrar objetos que solo existen en el destino</span><span class="en">Allows dropping objects that exist only on the target</span></td></tr>
+      <tr><td><code>--include-table-drops</code></td><td><span class="es">Permite borrar tablas enteras</span><span class="en">Allows dropping whole tables</span></td></tr>
+      <tr><td><code>--allow-table-rebuild</code></td><td><span class="es">Permite reconstruir una tabla cuando un <code>ALTER</code> no alcanza</span><span class="en">Allows a table rebuild when an <code>ALTER</code> cannot do it</span></td></tr>
+      <tr><td><code>--add-only</code></td><td><span class="es">Solo agrega lo que falta</span><span class="en">Only adds what is missing</span></td></tr>
+      <tr><td><code>--apply</code></td><td><span class="es">Con <code>sync</code>: aplica de verdad</span><span class="en">With <code>sync</code>: actually apply</span></td></tr>
+      <tr><td><code>--dry-run</code></td><td><span class="es">Muestra lo que haría sin escribir</span><span class="en">Shows what it would do without writing</span></td></tr>
+      <tr><td><code>--no-transaction</code></td><td><span class="es">No envolver la aplicación en una transacción</span><span class="en">Do not wrap the apply in a transaction</span></td></tr>
+      <tr><td><code>--timeout-seconds &lt;N&gt;</code></td><td><span class="es">Timeout por lote. Default 120</span><span class="en">Per-batch timeout. Defaults to 120</span></td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+</main>
+
+<footer><div class="wrap fl">
+  <div>
+    <div><b>PeopleWorks SQLDiff</b> · <span class="es">Licencia</span><span class="en">License</span>
+      <a href="https://github.com/peopleworks/SqlSchemaDiff/blob/main/LICENSE">MIT</a></div>
+    <div style="margin-top:6px">
+      <span class="es">Creado por</span><span class="en">Created by</span>
+      <a href="https://github.com/pedrohernandez-xari">Pedro Hernández</a> —
+      PeopleWorks Services, LLC &amp; Xari Technologies
+    </div>
+  </div>
+  <div style="text-align:right">
+    <div><a href="https://github.com/peopleworks/SqlSchemaDiff">Repo</a> ·
+      <a href="https://github.com/peopleworks/SqlSchemaDiff/blob/main/README.md">README</a> ·
+      <a href="https://github.com/peopleworks/SqlSchemaDiff/issues">Issues</a></div>
+    <div style="margin-top:6px">
+      <span class="es">Guías hermanas</span><span class="en">Sibling guides</span>:
+      <a href="https://peopleworks.github.io/DBFSync/">DBFSync</a> ·
+      <a href="https://peopleworks.github.io/syncjob/">SyncJob</a></div>
+  </div>
+</div></footer>
+
+<a href="#" class="up" id="up" aria-label="Top"><svg viewBox="0 0 16 16"><path d="M8 3.5 3 8.5l1.06 1.06L7.25 6.4V13h1.5V6.4l3.19 3.16L13 8.5 8 3.5Z"/></svg></a>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var btns = document.querySelectorAll('.seg button');
+
+  function apply(lang) {
+    root.setAttribute('data-lang', lang);
+    root.setAttribute('lang', lang);
+    btns.forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b.dataset.set === lang));
+    });
+    try { localStorage.setItem('sqldiff-lang', lang); } catch (e) {}
+  }
+
+  var saved = null;
+  try { saved = localStorage.getItem('sqldiff-lang'); } catch (e) {}
+  if (saved !== 'es' && saved !== 'en') {
+    saved = (navigator.language || 'es').toLowerCase().indexOf('es') === 0 ? 'es' : 'en';
+  }
+  apply(saved);
+
+  btns.forEach(function (b) {
+    b.addEventListener('click', function () { apply(b.dataset.set); });
+  });
+
+  // copy buttons
+  var ICON_COPY = '<svg viewBox="0 0 16 16"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"/><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>';
+  var ICON_OK = '<svg viewBox="0 0 16 16"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"/></svg>';
+
+  document.querySelectorAll('.cmd').forEach(function (block) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.innerHTML = ICON_COPY;
+    btn.setAttribute('aria-label', 'Copy');
+    btn.addEventListener('click', function () {
+      // take only the text visible in the active language
+      var clone = block.querySelector('code').cloneNode(true);
+      var hide = root.getAttribute('data-lang') === 'es' ? '.en' : '.es';
+      clone.querySelectorAll(hide).forEach(function (n) { n.remove(); });
+      var text = clone.textContent.replace(/\u00a0/g, ' ');
+      var done = function () {
+        btn.innerHTML = ICON_OK; btn.classList.add('done');
+        setTimeout(function () { btn.innerHTML = ICON_COPY; btn.classList.remove('done'); }, 1400);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () {});
+      } else {
+        var ta = document.createElement('textarea');
+        ta.value = text; document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); done(); } catch (e) {}
+        document.body.removeChild(ta);
+      }
+    });
+    block.appendChild(btn);
+  });
+
+  // back to top
+  var up = document.getElementById('up');
+  addEventListener('scroll', function () {
+    up.classList.toggle('show', scrollY > 700);
+  }, { passive: true });
+})();
+</script>
+</body>
+</html>

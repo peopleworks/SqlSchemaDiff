@@ -7,6 +7,8 @@
 [![Latest release](https://img.shields.io/github/v/release/peopleworks/SqlSchemaDiff?label=release&logo=github)](https://github.com/peopleworks/SqlSchemaDiff/releases)
 [![GitHub stars](https://img.shields.io/github/stars/peopleworks/SqlSchemaDiff?style=social)](https://github.com/peopleworks/SqlSchemaDiff/stargazers)
 
+**[📖 Pocket guide — every command on one page](https://peopleworks.github.io/SqlSchemaDiff/)**
+
 **Compare two SQL Server databases and generate the migration script that makes one
 match the other — without dropping your tables.**
 
@@ -497,6 +499,17 @@ keeping each in step between two servers is a different job:
 | Safety | Drops gated, warnings in the script, transactional apply | Stage/final two-phase load, row-count thresholds, `--dry-run` |
 
 Both are .NET 9, target SQL Server 2016 and newer, and are MIT-licensed.
+
+There is a third: **[DBFSync](https://github.com/peopleworks/DBFSync)** sits one step further
+back, pulling legacy Visual FoxPro DBF data into PostgreSQL, SQL Server or SQLite while the
+Xbase++ ERP stays in production. The three chain in order — **SQLDiff** settles the schema,
+**DBFSync** loads the legacy rows onto it, **SyncJob** moves those rows onward.
+
+Each one ships its whole command surface as a single page:
+
+| | [DBFSync](https://github.com/peopleworks/DBFSync) | SQLDiff *(this repo)* | [SyncJob](https://github.com/peopleworks/syncjob) |
+|---|---|---|---|
+| **Pocket guide** | [📖 peopleworks.github.io/DBFSync](https://peopleworks.github.io/DBFSync/) | [📖 peopleworks.github.io/SqlSchemaDiff](https://peopleworks.github.io/SqlSchemaDiff/) | [📖 peopleworks.github.io/syncjob](https://peopleworks.github.io/syncjob/) |
 
 **They compose.** Ship the schema first, then the rows:
 
