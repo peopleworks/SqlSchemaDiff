@@ -19,7 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\SqlSchemaDiff.csproj" />
+    <ProjectReference Include="..\..\SqlSchemaDiff.Engine\PeopleWorks.SchemaEngine.csproj" />
   </ItemGroup>
 
 </Project>

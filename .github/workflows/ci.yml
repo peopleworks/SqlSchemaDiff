@@ -35,6 +35,9 @@ jobs:
       - name: Pack (verify the tool package builds)
         run: dotnet pack SqlSchemaDiff.csproj -c Release -o ./artifacts
 
+      - name: Pack the engine library (verify it still packages)
+        run: dotnet pack SqlSchemaDiff.Engine/PeopleWorks.SchemaEngine.csproj -c Release -o ./artifacts
+
   integration:
     name: round-trip against SQL Server
     runs-on: ubuntu-latest

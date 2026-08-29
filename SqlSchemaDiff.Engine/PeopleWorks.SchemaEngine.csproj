@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>PeopleWorks.SchemaEngine</AssemblyName>
+    <!-- The namespaces stay SqlSchemaDiff.* on purpose: renaming them would churn
+         every consumer for no functional gain, and this is SQLDiff's engine. -->
+    <RootNamespace>SqlSchemaDiff</RootNamespace>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Version>1.4.0</Version>
+    <PackageId>PeopleWorks.SchemaEngine</PackageId>
+    <Title>PeopleWorks Schema Engine</Title>
+    <Authors>Pedro Hernandez (PeopleWorks)</Authors>
+    <Company>PeopleWorks</Company>
+    <Description>SQL Server schema extraction, comparison and data-preserving ALTER script generation. The engine behind SQLDiff, packaged so that CLIs, MCP servers and applications share one implementation instead of forking it.</Description>
+    <PackageTags>sql-server;schema;diff;migration;ddl;alter-table;library</PackageTags>
+    <PackageProjectUrl>https://github.com/peopleworks/SqlSchemaDiff</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/peopleworks/SqlSchemaDiff</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SqlSchemaDiff.Tests" />
+  </ItemGroup>
+
+</Project>

@@ -37,8 +37,14 @@ jobs:
           -p:EnableCompressionInSingleFile=true
           -o ./publish/linux-x64
 
+      # Two packages ship from this repo: the CLI as a .NET tool, and the engine
+      # it wraps. The engine has to be on NuGet for the MCP server and DPO to
+      # consume it instead of keeping their own forked copies.
       - name: Pack the .NET tool
         run: dotnet pack SqlSchemaDiff.csproj -c Release -o ./artifacts
+
+      - name: Pack the engine library
+        run: dotnet pack SqlSchemaDiff.Engine/PeopleWorks.SchemaEngine.csproj -c Release -o ./artifacts
 
       - name: Zip the executables
         shell: pwsh
