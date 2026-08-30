@@ -108,7 +108,23 @@ jobs:
         with:
           user: peopleworksservices
 
+      # The glob is expanded by the shell, one push per package. Quoting it and
+      # letting the NuGet client expand it - which is what the other repos do -
+      # works on their ubuntu runners but not here: on Windows the client took
+      # ./artifacts/*.nupkg literally and reported "File does not exist".
+      #
+      # Only *.nupkg is listed: the client pushes the matching .snupkg to the
+      # symbol server on its own whenever one sits beside the package.
       - name: Push to NuGet
         shell: bash
         run: |
-          dotnet nuget push "./artifacts/*.nupkg"             --api-key "${{ steps.login.outputs.NUGET_API_KEY }}"             --source https://api.nuget.org/v3/index.json             --skip-duplicate
+          shopt -s nullglob
+          packages=(./artifacts/*.nupkg)
+          if [ ${#packages[@]} -eq 0 ]; then
+            echo "::error::No packages found under ./artifacts to push."
+            exit 1
+          fi
+          for pkg in "${packages[@]}"; do
+            echo "--- pushing $pkg"
+            dotnet nuget push "$pkg"               --api-key "${{ steps.login.outputs.NUGET_API_KEY }}"               --source https://api.nuget.org/v3/index.json               --skip-duplicate
+          done
