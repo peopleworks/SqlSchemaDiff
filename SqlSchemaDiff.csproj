@@ -12,10 +12,10 @@
 
   <!-- Packaging as a global .NET tool; installs the sqldiff command. -->
   <PropertyGroup>
-    <Version>1.4.0</Version>
+    <Version>1.5.0</Version>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>sqldiff</ToolCommandName>
-    <PackageId>SqlSchemaDiff</PackageId>
+    <PackageId>SqlSchemaDiff.Cli</PackageId>
     <Title>SQLDiff</Title>
     <Authors>Pedro Hernandez (PeopleWorks)</Authors>
     <Company>PeopleWorks</Company>
@@ -35,7 +35,7 @@
   <!-- The engine is a package of its own; the CLI is a wrapper over it.
        Microsoft.Data.SqlClient arrives transitively - Program.cs never touches it. -->
   <ItemGroup>
-    <ProjectReference Include="SqlSchemaDiff.Engine\PeopleWorks.SchemaEngine.csproj" />
+    <ProjectReference Include="SqlSchemaDiff.Core\SqlSchemaDiff.Core.csproj" />
   </ItemGroup>
 
   <!-- Both live under this directory, so the default glob would compile them
@@ -43,8 +43,8 @@
   <ItemGroup>
     <Compile Remove="tests/**/*.cs" />
     <None Remove="tests/**/*" />
-    <Compile Remove="SqlSchemaDiff.Engine/**/*.cs" />
-    <None Remove="SqlSchemaDiff.Engine/**/*" />
+    <Compile Remove="SqlSchemaDiff.Core/**/*.cs" />
+    <None Remove="SqlSchemaDiff.Core/**/*" />
   </ItemGroup>
 
 </Project>
