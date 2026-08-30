@@ -24,6 +24,17 @@
     <RepositoryType>git</RepositoryType>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+
+    <!-- Source Link: the debugger fetches the exact sources from GitHub, so anyone
+         consuming the package can step into it. PublishRepositoryUrl is what turns
+         it on; EmbedUntrackedSources covers generated files that are not in git. -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+
+    <!-- Symbols, as a .snupkg pushed alongside the .nupkg to the NuGet symbol
+         server. The release workflow fails if one is missing. -->
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
 
   <ItemGroup>

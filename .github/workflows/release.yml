@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write # required to obtain the OIDC token for trusted publishing
 
 jobs:
   release:
@@ -46,6 +47,34 @@ jobs:
       - name: Pack the engine library
         run: dotnet pack SqlSchemaDiff.Core/SqlSchemaDiff.Core.csproj -c Release -o ./artifacts
 
+      # Guards the classic footgun: tagging v1.5.0 while the csproj files still
+      # say 1.4.0. --skip-duplicate would swallow that and report success, and a
+      # published version can never be deleted.
+      - name: Check the release tag matches what we built
+        if: startsWith(github.ref_name, 'v')
+        shell: bash
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+
+          if ! ls ./artifacts/*."$want".nupkg >/dev/null 2>&1; then
+            echo "::error::Release is tagged $GITHUB_REF_NAME, but nothing packed as version $want."
+            echo "Bump <Version> in SqlSchemaDiff.csproj and SqlSchemaDiff.Core/SqlSchemaDiff.Core.csproj, or retag."
+            ls -1 ./artifacts/
+            exit 1
+          fi
+
+          # A library nobody can step into is a library half shipped, and the gap
+          # would only surface months later. The tool package is an executable and
+          # carries no symbols by design.
+          if [ ! -f "./artifacts/SqlSchemaDiff.Core.$want.snupkg" ]; then
+            echo "::error::SqlSchemaDiff.Core.$want.nupkg has no .snupkg beside it - symbol publishing is broken."
+            echo "Check IncludeSymbols/SymbolPackageFormat in SqlSchemaDiff.Core/SqlSchemaDiff.Core.csproj."
+            ls -1 ./artifacts/
+            exit 1
+          fi
+
+          echo "Tag $GITHUB_REF_NAME matches the packages."
+
       - name: Zip the executables
         shell: pwsh
         run: |
@@ -60,15 +89,26 @@ jobs:
             ./artifacts/*.nupkg
           generate_release_notes: true
 
-      # Set the NUGET_API_KEY secret to publish; the step is skipped without it.
-      # The secrets context is not available to a step-level `if`, so the value is
-      # read through env, which is.
+      # No API key is stored anywhere. NuGet Trusted Publishing trades this
+      # workflow's OIDC token for a key that lives one hour, so the login has to
+      # sit immediately before the push. It needs a policy at
+      # nuget.org -> Account -> Trusted Publishing:
+      #
+      #   Package Owner: peopleworksservices   Repository Owner: peopleworks
+      #   Repository: SqlSchemaDiff            Workflow File: release.yml
+      #   Environment: (empty)                 Glob: SqlSchemaDiff.*
+      #
+      # This is the same mechanism XAFLogicExplainer and SignsofAI publish with;
+      # those repos keep it in a separate nuget.yml fired by `release: published`,
+      # which cannot work here because the release above is created with
+      # GITHUB_TOKEN and events from GITHUB_TOKEN do not trigger workflows.
+      - name: NuGet login (trusted publishing)
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: peopleworksservices
+
       - name: Push to NuGet
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-        if: env.NUGET_API_KEY != ''
-        run: >
-          dotnet nuget push ./artifacts/*.nupkg
-          --api-key $env:NUGET_API_KEY
-          --source https://api.nuget.org/v3/index.json
-          --skip-duplicate
+        shell: bash
+        run: |
+          dotnet nuget push "./artifacts/*.nupkg"             --api-key "${{ steps.login.outputs.NUGET_API_KEY }}"             --source https://api.nuget.org/v3/index.json             --skip-duplicate
