@@ -1,6 +1,4 @@
 using System.Reflection;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using SqlSchemaDiff.Models;
 using SqlSchemaDiff.Services;
 
@@ -8,12 +6,6 @@ return await ProgramMain.RunAsync(args);
 
 internal static class ProgramMain
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        WriteIndented = true,
-        Converters = { new JsonStringEnumConverter() }
-    };
-
     public static async Task<int> RunAsync(string[] args)
     {
         if(args.Length == 0)
@@ -74,8 +66,8 @@ internal static class ProgramMain
         await File.WriteAllTextAsync(outSql, script);
         if(!string.IsNullOrWhiteSpace(outJson))
         {
-            var json = JsonSerializer.Serialize(snapshot, JsonOptions);
-            await File.WriteAllTextAsync(outJson, json);
+            var versioned = WithGeneratedBy(snapshot, $"sqldiff {GetVersion()}");
+            await SnapshotSerializer.SaveAsync(versioned, outJson, CancellationToken.None);
         }
 
         PrintSnapshotSummary("Extract", snapshot);
@@ -85,6 +77,23 @@ internal static class ProgramMain
             Console.WriteLine($"Snapshot JSON written to: {Path.GetFullPath(outJson)}");
         return 0;
     }
+
+    /// <summary>
+    /// DatabaseSnapshot's properties are init-only by design, so stamping
+    /// GeneratedBy on the way out means building a copy rather than mutating the
+    /// snapshot the extractor returned.
+    /// </summary>
+    private static DatabaseSnapshot WithGeneratedBy(DatabaseSnapshot snapshot, string generatedBy) =>
+        new()
+        {
+            DatabaseName = snapshot.DatabaseName,
+            GeneratedAtUtc = snapshot.GeneratedAtUtc,
+            Schemas = snapshot.Schemas,
+            Types = snapshot.Types,
+            Objects = snapshot.Objects,
+            FormatVersion = snapshot.FormatVersion,
+            GeneratedBy = generatedBy
+        };
 
     private static async Task<int> RunDiffAsync(CliOptions options, string mode)
     {
@@ -275,11 +284,7 @@ internal static class ProgramMain
             if(!File.Exists(snapshotPath))
                 throw new FileNotFoundException($"Snapshot for {label} not found: {snapshotPath}");
 
-            var json = await File.ReadAllTextAsync(snapshotPath);
-            var snapshot = JsonSerializer.Deserialize<DatabaseSnapshot>(json, JsonOptions);
-            if(snapshot is null)
-                throw new InvalidOperationException($"Invalid snapshot: {snapshotPath}");
-            return snapshot;
+            return await SnapshotSerializer.LoadAsync(snapshotPath, CancellationToken.None);
         }
 
         var connectionString = options.GetConnection(side);
