@@ -20,4 +20,18 @@ public sealed class DatabaseSnapshot
     public List<AliasTypeModel> Types { get; init; } = new();
 
     public List<DbSchemaObject> Objects { get; init; } = new();
+
+    /// <summary>
+    /// Version of the snapshot JSON shape itself, not of the tool that wrote it.
+    /// A file with no <c>FormatVersion</c> property predates this field and is
+    /// treated as version 1 — see <see cref="Services.SnapshotSerializer"/>.
+    /// </summary>
+    public int FormatVersion { get; init; } = 1;
+
+    /// <summary>
+    /// Free-form "tool name + version" stamp (e.g. <c>"sqldiff 1.6.0"</c>) recorded
+    /// for diagnosing which producer wrote a snapshot. The extractor does not set
+    /// this; callers that care — the CLI, other consumers — do.
+    /// </summary>
+    public string? GeneratedBy { get; init; }
 }
