@@ -119,11 +119,15 @@ dotnet bin/Release/net9.0/sqldiff.dll --help
 ```
 
 **Or as a .NET global tool** — the project packs as one, and the release workflow
-publishes it when a `NUGET_API_KEY` secret is present:
+publishes it to NuGet with trusted publishing, no stored key:
 
 ```bash
-dotnet tool install --global SqlSchemaDiff.Cli   # installs the `sqldiff` command
+dotnet tool install --global PeopleWorks.SqlSchemaDiff.Cli   # installs the `sqldiff` command
 ```
+
+> Until 1.5.0 the packages were `SqlSchemaDiff.Cli` and `SqlSchemaDiff.Core`. Both ids stay
+> on nuget.org, deprecated with a pointer to the family-named ones. The command is still
+> `sqldiff` and the namespaces did not change.
 
 Runs on Windows, Linux and macOS. Works against **SQL Server 2016 and newer**, any
 edition — Developer, Express and Azure SQL included.
@@ -131,12 +135,12 @@ edition — Developer, Express and Azure SQL included.
 ### Or use the engine as a library
 
 The CLI is a thin wrapper over
-[**SqlSchemaDiff.Core**](SqlSchemaDiff.Core/README.md) — the extraction, comparison
+[**PeopleWorks.SqlSchemaDiff.Core**](SqlSchemaDiff.Core/README.md) — the extraction, comparison
 and `ALTER` generation live there, and the package is published alongside the tool so other
 programs can share one implementation instead of copying it.
 
 ```bash
-dotnet add package SqlSchemaDiff.Core
+dotnet add package PeopleWorks.SqlSchemaDiff.Core
 ```
 
 ```csharp

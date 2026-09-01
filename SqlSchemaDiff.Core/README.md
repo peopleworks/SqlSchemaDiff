@@ -1,4 +1,4 @@
-# SqlSchemaDiff.Core
+# PeopleWorks.SqlSchemaDiff.Core
 
 The SQL Server schema engine behind [SQLDiff](https://github.com/peopleworks/SqlSchemaDiff),
 packaged as a library so that every tool that needs it shares **one** implementation.
@@ -19,7 +19,7 @@ One package, one behaviour, one place to fix a bug.
 ## Install
 
 ```bash
-dotnet add package SqlSchemaDiff.Core
+dotnet add package PeopleWorks.SqlSchemaDiff.Core
 ```
 
 ## Using it

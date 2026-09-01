@@ -66,8 +66,8 @@ jobs:
           # A library nobody can step into is a library half shipped, and the gap
           # would only surface months later. The tool package is an executable and
           # carries no symbols by design.
-          if [ ! -f "./artifacts/SqlSchemaDiff.Core.$want.snupkg" ]; then
-            echo "::error::SqlSchemaDiff.Core.$want.nupkg has no .snupkg beside it - symbol publishing is broken."
+          if [ ! -f "./artifacts/PeopleWorks.SqlSchemaDiff.Core.$want.snupkg" ]; then
+            echo "::error::PeopleWorks.SqlSchemaDiff.Core.$want.nupkg has no .snupkg beside it - symbol publishing is broken."
             echo "Check IncludeSymbols/SymbolPackageFormat in SqlSchemaDiff.Core/SqlSchemaDiff.Core.csproj."
             ls -1 ./artifacts/
             exit 1
@@ -96,7 +96,11 @@ jobs:
       #
       #   Package Owner: peopleworksservices   Repository Owner: peopleworks
       #   Repository: SqlSchemaDiff            Workflow File: release.yml
-      #   Environment: (empty)                 Glob: SqlSchemaDiff.*
+      #   Environment: (empty)                 Glob: PeopleWorks.SqlSchemaDiff.*
+      #
+      # The glob changed with the 1.6.0 rename: a policy still scoped to
+      # SqlSchemaDiff.* cannot push PeopleWorks.SqlSchemaDiff.*, and the push fails
+      # with 403 rather than publishing under the wrong name.
       #
       # This is the same mechanism XAFLogicExplainer and SignsofAI publish with;
       # those repos keep it in a separate nuget.yml fired by `release: published`,
