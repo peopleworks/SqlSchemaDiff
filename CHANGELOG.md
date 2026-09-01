@@ -4,6 +4,23 @@ All notable changes to SQLDiff are recorded here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - Unreleased
+
+### Changed
+
+- **The packages carry the family name.** `SqlSchemaDiff.Core` is now
+  **`PeopleWorks.SqlSchemaDiff.Core`** and `SqlSchemaDiff.Cli` is
+  **`PeopleWorks.SqlSchemaDiff.Cli`**, in line with `PeopleWorks.SyncJob` and
+  `PeopleWorks.DBFSync`. The assembly (`SqlSchemaDiff.Core.dll`), the namespaces
+  (`SqlSchemaDiff.Models`, `SqlSchemaDiff.Services`) and the command (`sqldiff`) do not
+  change, so a consumer only edits its `PackageReference`. The 1.5.0 ids stay on nuget.org,
+  deprecated with a pointer to the new ones.
+
+  ```bash
+  dotnet tool install --global PeopleWorks.SqlSchemaDiff.Cli
+  dotnet add package PeopleWorks.SqlSchemaDiff.Core
+  ```
+
 ## [1.5.0] - 2026-08-29
 
 ### Added

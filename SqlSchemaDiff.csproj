@@ -12,11 +12,12 @@
 
   <!-- Packaging as a global .NET tool; installs the sqldiff command. -->
   <PropertyGroup>
-    <Version>1.5.0</Version>
+    <Version>1.6.0</Version>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>sqldiff</ToolCommandName>
-    <PackageId>SqlSchemaDiff.Cli</PackageId>
-    <Title>SQLDiff</Title>
+    <!-- Family-named since 1.6.0 (was SqlSchemaDiff.Cli); the command is still sqldiff. -->
+    <PackageId>PeopleWorks.SqlSchemaDiff.Cli</PackageId>
+    <Title>PeopleWorks SQLDiff</Title>
     <Authors>Pedro Hernandez (PeopleWorks)</Authors>
     <Company>PeopleWorks</Company>
     <Description>Command-line schema diff and sync for SQL Server: extract a schema, compare two databases, and apply data-preserving ALTER scripts inside one transaction.</Description>

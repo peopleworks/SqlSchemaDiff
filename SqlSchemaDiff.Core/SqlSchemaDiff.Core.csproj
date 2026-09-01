@@ -12,9 +12,13 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <Version>1.5.0</Version>
-    <PackageId>SqlSchemaDiff.Core</PackageId>
-    <Title>SQLDiff Core</Title>
+    <Version>1.6.0</Version>
+    <!-- The package carries the family name since 1.6.0; the assembly and the
+         namespaces do not, so a consumer only changes its PackageReference. The
+         1.5.0 ids SqlSchemaDiff.Core / SqlSchemaDiff.Cli are deprecated on nuget.org
+         and point here. -->
+    <PackageId>PeopleWorks.SqlSchemaDiff.Core</PackageId>
+    <Title>PeopleWorks SQLDiff Core</Title>
     <Authors>Pedro Hernandez (PeopleWorks)</Authors>
     <Company>PeopleWorks</Company>
     <Description>SQL Server schema extraction, comparison and data-preserving ALTER script generation. The engine behind SQLDiff, packaged so that CLIs, MCP servers and applications share one implementation instead of forking it.</Description>
