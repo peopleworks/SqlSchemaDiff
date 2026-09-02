@@ -24,6 +24,7 @@ public sealed class SqlServerSchemaExtractor
         var databaseName = (await ExecuteScalarAsync(connection, "SELECT DB_NAME();", cancellationToken))?.ToString() ?? "UNKNOWN";
 
         var tables = await GetTablesAsync(connection, cancellationToken);
+        var periods = await GetPeriodsAsync(connection, cancellationToken);
         var columns = await GetColumnsAsync(connection, cancellationToken);
         var indexColumns = await GetIndexColumnsAsync(connection, cancellationToken);
         var compression = await GetDataCompressionAsync(connection, cancellationToken);
@@ -35,6 +36,7 @@ public sealed class SqlServerSchemaExtractor
         var objects = new List<DbSchemaObject>();
         foreach(var table in tables)
         {
+            periods.TryGetValue(table.ObjectId, out var period);
             var model = new TableModel
             {
                 Schema = table.Schema,
@@ -47,7 +49,14 @@ public sealed class SqlServerSchemaExtractor
                 // index_id 0 is a heap, 1 a clustered index; a table has exactly one
                 // of the two and its compression is the table's own.
                 DataCompression = LookupCompression(compression, table.ObjectId, 0)
-                                  ?? LookupCompression(compression, table.ObjectId, 1)
+                                  ?? LookupCompression(compression, table.ObjectId, 1),
+                IsMemoryOptimized = table.IsMemoryOptimized,
+                Durability = table.IsMemoryOptimized ? table.DurabilityDesc : null,
+                TemporalType = table.TemporalTypeDesc,
+                HistoryTableSchema = table.HistorySchema,
+                HistoryTableName = table.HistoryName,
+                PeriodStartColumn = period.Start,
+                PeriodEndColumn = period.End
             };
 
             var dependencies = model.ForeignKeys
@@ -110,9 +119,16 @@ public sealed class SqlServerSchemaExtractor
                                t.object_id,
                                s.name AS schema_name,
                                t.name,
-                               t.temporal_type
+                               t.temporal_type,
+                               t.temporal_type_desc,
+                               hs.name AS history_schema,
+                               ht.name AS history_name,
+                               t.is_memory_optimized,
+                               t.durability_desc
                            FROM sys.tables t
                            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
+                           LEFT JOIN sys.tables ht ON ht.object_id = t.history_table_id
+                           LEFT JOIN sys.schemas hs ON hs.schema_id = ht.schema_id
                            WHERE t.is_ms_shipped = 0
                            ORDER BY s.name, t.name;
                            """;
@@ -138,10 +154,57 @@ public sealed class SqlServerSchemaExtractor
             if(temporalType == 2)
                 Notices.Add($"[{schema}].[{name}] is system-versioned; the SYSTEM_VERSIONING clause is not scripted");
 
-            tables.Add(new TableInfo(reader.GetInt32(0), schema, name));
+            // A memory-optimized table has to declare its indexes inside CREATE TABLE
+            // - it cannot be created without at least a primary key, and CREATE INDEX
+            // is rejected on one - so the script this renderer emits would not apply.
+            // Say so rather than hand over a CREATE that fails halfway.
+            var isMemoryOptimized = reader.GetBoolean(7);
+            if(isMemoryOptimized)
+            {
+                Notices.Add($"[{schema}].[{name}] is memory-optimized; its MEMORY_OPTIMIZED and " +
+                            "DURABILITY options and its inline indexes are not scripted");
+            }
+
+            // NON_TEMPORAL is stored as null so an ordinary table carries nothing new
+            // in its snapshot and keeps comparing equal to one taken by an older build.
+            tables.Add(new TableInfo(
+                reader.GetInt32(0), schema, name,
+                temporalType == 0 ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                isMemoryOptimized,
+                reader.IsDBNull(8) ? null : reader.GetString(8)));
         }
 
         return tables;
+    }
+
+    /// <summary>
+    /// The SYSTEM_TIME period columns of every temporal table. Captured so a future
+    /// composer can emit <c>PERIOD FOR SYSTEM_TIME</c>; nothing renders them yet.
+    /// </summary>
+    private static async Task<Dictionary<int, (string? Start, string? End)>> GetPeriodsAsync(
+        SqlConnection connection, CancellationToken cancellationToken)
+    {
+        const string sql = """
+                           SELECT
+                               p.object_id,
+                               sc.name AS start_column,
+                               ec.name AS end_column
+                           FROM sys.periods p
+                           INNER JOIN sys.tables t ON t.object_id = p.object_id AND t.is_ms_shipped = 0
+                           INNER JOIN sys.columns sc ON sc.object_id = p.object_id AND sc.column_id = p.start_column_id
+                           INNER JOIN sys.columns ec ON ec.object_id = p.object_id AND ec.column_id = p.end_column_id;
+                           """;
+
+        var result = new Dictionary<int, (string? Start, string? End)>();
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while(await reader.ReadAsync(cancellationToken))
+            result[reader.GetInt32(0)] = (reader.GetString(1), reader.GetString(2));
+
+        return result;
     }
 
     private static async Task<ILookup<int, ColumnModel>> GetColumnsAsync(SqlConnection connection, CancellationToken cancellationToken)
@@ -749,5 +812,8 @@ public sealed class SqlServerSchemaExtractor
         return await command.ExecuteScalarAsync(cancellationToken);
     }
 
-    private sealed record TableInfo(int ObjectId, string Schema, string Name);
+    private sealed record TableInfo(
+        int ObjectId, string Schema, string Name,
+        string? TemporalTypeDesc, string? HistorySchema, string? HistoryName,
+        bool IsMemoryOptimized, string? DurabilityDesc);
 }

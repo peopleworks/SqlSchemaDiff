@@ -119,6 +119,11 @@ public class LegacySnapshotJsonTests
 
         Assert.All(table.Columns, column => Assert.False(column.IsSparse));
         Assert.Null(table.DataCompression);
+        Assert.Null(table.TemporalType);
+        Assert.Null(table.HistoryTableName);
+        Assert.Null(table.PeriodStartColumn);
+        Assert.False(table.IsMemoryOptimized);
+        Assert.Null(table.Durability);
 
         foreach(IIndexStorageOptions options in new IIndexStorageOptions[] { table.KeyConstraints[0], table.Indexes[0] })
         {

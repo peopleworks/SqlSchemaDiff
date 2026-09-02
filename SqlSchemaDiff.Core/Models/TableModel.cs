@@ -24,6 +24,38 @@ public sealed class TableModel
     /// index the setting belongs to that index and is scripted there.
     /// </summary>
     public string? DataCompression { get; set; }
+
+    /// <summary>
+    /// <c>sys.tables.temporal_type_desc</c> for a system-versioned table, null for an
+    /// ordinary one. Captured but not yet rendered: a system-versioned table still
+    /// scripts as a plain table, with a notice, and this is what a composer will need
+    /// to emit <c>PERIOD FOR SYSTEM_TIME</c> and <c>SYSTEM_VERSIONING = ON</c>.
+    /// </summary>
+    public string? TemporalType { get; set; }
+
+    /// <summary>Schema of the history table SQL Server keeps for this one, if any.</summary>
+    public string? HistoryTableSchema { get; set; }
+
+    /// <summary>Name of the history table SQL Server keeps for this one, if any.</summary>
+    public string? HistoryTableName { get; set; }
+
+    /// <summary>The <c>SYSTEM_TIME</c> period's start column (<c>sys.periods</c>), if any.</summary>
+    public string? PeriodStartColumn { get; set; }
+
+    /// <summary>The <c>SYSTEM_TIME</c> period's end column (<c>sys.periods</c>), if any.</summary>
+    public string? PeriodEndColumn { get; set; }
+
+    /// <summary><c>sys.tables.is_memory_optimized</c>.</summary>
+    public bool IsMemoryOptimized { get; set; }
+
+    /// <summary>
+    /// <c>sys.tables.durability_desc</c> (SCHEMA_AND_DATA or SCHEMA_ONLY) for a
+    /// memory-optimized table, null otherwise. Captured but not rendered: a
+    /// memory-optimized table cannot be created without its indexes inline, which is
+    /// a different CREATE TABLE shape than this renderer emits, so extraction reports
+    /// such a table with a notice rather than scripting it wrongly.
+    /// </summary>
+    public string? Durability { get; set; }
 }
 
 public sealed class ColumnModel
