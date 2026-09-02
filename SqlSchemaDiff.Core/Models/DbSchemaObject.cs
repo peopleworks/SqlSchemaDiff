@@ -21,6 +21,17 @@ public sealed class DbSchemaObject
     /// </summary>
     public TableModel? Table { get; init; }
 
+    /// <summary>
+    /// <c>sys.sql_modules.uses_ansi_nulls</c> for a programmable object: the
+    /// setting the module was created with, which SQL Server re-applies every time
+    /// it runs. Null means unknown (an older snapshot, or a non-module) and is
+    /// treated as ON, which is the default and by far the common case.
+    /// </summary>
+    public bool? UsesAnsiNulls { get; init; }
+
+    /// <summary><c>sys.sql_modules.uses_quoted_identifier</c>. See <see cref="UsesAnsiNulls"/>.</summary>
+    public bool? UsesQuotedIdentifier { get; init; }
+
     [JsonIgnore]
     public string Identifier => $"[{Schema}].[{Name}]";
 
