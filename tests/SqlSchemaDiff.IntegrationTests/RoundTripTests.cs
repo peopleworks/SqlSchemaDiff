@@ -65,25 +65,14 @@ public sealed class RoundTripTests
 
     /// <summary>
     /// The same round trip through <see cref="ScriptComposer.ComposeFullScript"/>
-    /// instead of the differ.
-    /// <para>
-    /// Skipped, not deleted. The composer orders objects alphabetically inside each
-    /// type rank and emits foreign keys inline with their CREATE TABLE, so
-    /// [ops].[AuditEntry] goes out before the tables it points at. Against this
-    /// fixture SQL Server answers:
-    /// </para>
-    /// <code>
-    /// Foreign key 'FK_AuditEntry_Customer' references invalid table 'sales.Customer'.
-    /// Could not create constraint or index. See previous errors.
-    /// </code>
-    /// <para>
-    /// [sales].[Invoice] -> [sales].[Terms] fails the same way one batch later. The
-    /// differ does not have the problem because its creates are topologically
-    /// sorted. Delete the Skip when the composer is dependency-ordered too; the body
-    /// is complete and needs no other change.
-    /// </para>
+    /// instead of the differ. Before 1.6.0 this failed: the composer ordered objects
+    /// alphabetically inside each type rank and emitted foreign keys inline with
+    /// their CREATE TABLE, so [ops].[AuditEntry] went out before [sales].[Customer]
+    /// and SQL Server answered "references invalid table". The composer now sorts by
+    /// dependency and defers every foreign key to its own phase, and this test is
+    /// what keeps it that way.
     /// </summary>
-    [LiveFact(Skip = "ScriptComposer is not dependency-ordered yet (fixed by WP0.2)")]
+    [LiveFact]
     public async Task ComposeFullScriptRoundTrip()
     {
         var sourceConnection = await _sqlServer.CreateDatabaseWithFullSchemaAsync();
