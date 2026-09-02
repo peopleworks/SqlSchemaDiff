@@ -6,6 +6,37 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [1.6.0] - Unreleased
 
+### Added
+
+- **Triggers, sequences and user-defined table types** are extracted, compared and
+  scripted. DML triggers carry their parent table and their disabled state, which is
+  re-applied after every create or alter because `ALTER TRIGGER` re-enables what it
+  touches. Sequences diff by their properties and use `ALTER SEQUENCE` where SQL Server
+  allows it, with the current value captured for restores. A changed table type is
+  recreated with a warning naming the modules that reference it. Schema owners are
+  captured and named behind a `DATABASE_PRINCIPAL_ID` guard, so a script never fails on
+  a principal the target does not have.
+- **Column, index and table storage properties.** `SPARSE` columns; fill factor,
+  padding, `IGNORE_DUP_KEY`, lock options and data compression on indexes and key
+  constraints, changed in place with `ALTER INDEX ... SET` or `REBUILD`; clustered and
+  nonclustered columnstore indexes; heap compression. Temporal and memory-optimized
+  tables are captured with their flags and reported, not scripted.
+- **A full script in dependency order, in phases.** `ScriptComposer.ComposePhases`
+  returns schemas, types, sequences, tables, indexes, checks, foreign keys, modules,
+  triggers and finalize as separate phases. `ConstraintsAfterData` gives the shape a
+  restore wants, rows loaded before any index or constraint; `RestartSequences` puts
+  every sequence back where the source left it. `ComposeFullScript` is the same script
+  in one file. The topological sort the differ already used now lives in
+  `DependencyOrder`, shared by both.
+- **`SnapshotSerializer`** saves and loads snapshots with the one set of JSON options
+  that round-trips them, and stamps `FormatVersion` and `GeneratedBy`. The CLI uses it,
+  and a NuGet consumer no longer has to duplicate the options to read a snapshot.
+- **Live tests against a real SQL Server.** `tests/SqlSchemaDiff.IntegrationTests`
+  builds a database that exercises every supported construct, scripts it, restores it
+  into an empty database and requires the two to compare equal. CI runs it against the
+  SQL Server 2022 container; `SQLDIFF_TEST_CONN` runs it locally. Before this release
+  the extractor, the largest file in the engine, had no test that touched a server.
+
 ### Changed
 
 - **The packages carry the family name.** `SqlSchemaDiff.Core` is now
@@ -20,6 +51,26 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   dotnet tool install --global PeopleWorks.SqlSchemaDiff.Cli
   dotnet add package PeopleWorks.SqlSchemaDiff.Core
   ```
+
+- A module created with `ANSI_NULLS` or `QUOTED_IDENTIFIER` off is scripted inside the
+  matching `SET` batches, in the diff and in the full script, instead of silently taking
+  the session defaults.
+- `ObjectFilter` understands `trigger:`, `sequence:` and `tabletype:` prefixes, and the
+  CLI summary counts the new kinds.
+
+### Fixed
+
+- **The full script from `extract` could not be applied to an empty database** when a
+  foreign key pointed at a table whose name sorts later: objects were ordered
+  alphabetically inside each type and foreign keys were emitted inline with their table.
+  Every foreign key now goes in its own phase after all tables, and tables, views and
+  functions follow their dependencies.
+- `SqlModuleRewriter` rewrote any `CREATE` to `CREATE OR ALTER`, including the kinds SQL
+  Server rejects; it now checks the object kind first.
+- The module dependency query joined `sys.sql_expression_dependencies` to `sys.objects`
+  without filtering on `referenced_class`, so a reference to a type could match an
+  unrelated object that happened to share the id.
+- The pocket guide's install command named a package that never existed.
 
 ## [1.5.0] - 2026-08-29
 

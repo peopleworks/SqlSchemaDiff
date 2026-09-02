@@ -291,18 +291,18 @@ script it writes is a report; do not pipe it into `apply` without reading it.
 
 | Supported | Not yet |
 |---|---|
-| Tables, columns, identity, computed & persisted columns, collation, defaults | Triggers, sequences, synonyms |
-| Primary keys, unique constraints, check constraints, foreign keys | Table types, CLR types, assemblies |
-| Indexes: clustered, nonclustered, unique, filtered, `INCLUDE`, `DESC` | Columnstore, XML, spatial and hash indexes *(reported, not scripted)* |
-| Views, stored procedures, scalar and table-valued functions | Extended properties, permissions, users and roles |
-| Schemas and user-defined alias types (as prerequisites) | Partition schemes and functions, filegroups |
-| System-named constraints, matched by shape rather than by name | Temporal `SYSTEM_VERSIONING` clauses *(history tables are skipped)* |
+| Tables, columns, identity, computed & persisted columns, collation, defaults, `SPARSE` | Synonyms, CLR types, assemblies |
+| Primary keys, unique constraints, check constraints, foreign keys, with their disabled and untrusted state | Extended properties, permissions, users and roles |
+| Indexes: clustered, nonclustered, unique, filtered, `INCLUDE`, `DESC`, columnstore, with fill factor, padding, lock and compression options | XML, spatial and hash indexes *(reported, not scripted)* |
+| Views, stored procedures, scalar and table-valued functions, DML triggers | Partition schemes and functions, filegroups |
+| Sequences, user-defined table types, alias types, schemas with their owner | Temporal `SYSTEM_VERSIONING` and memory-optimized tables *(captured and reported, not scripted)* |
+| System-named constraints, matched by shape rather than by name | |
 
 Anything in the right-hand column is skipped rather than mangled, and the ones that could
 matter for correctness are **reported on the console** rather than dropped silently:
 
 ```console
-  NOTE: skipped index [CCI_Sales] on [dbo].[Sales]: unsupported index type CLUSTERED COLUMNSTORE
+  NOTE: [dbo].[Employee] is system-versioned; the SYSTEM_VERSIONING clause is not scripted
   NOTE: skipped [dbo].[EmployeeHistory]: temporal history table (managed by SQL Server)
 ```
 
@@ -418,6 +418,9 @@ Services/
   SqlRender                  renders every piece of SQL, shared by extract and diff
   SchemaDiffer               object-level diff, dependency ordering, prerequisites
   TableDiffer                column-level diff producing ALTER statements
+  ScriptComposer             full-database script in dependency-ordered phases
+  DependencyOrder            the topological sort the differ and the composer share
+  SnapshotSerializer         save and load snapshots with one set of JSON options
   SqlModuleRewriter          CREATE -> CREATE OR ALTER, comment-aware
   SqlBatchExecutor           splits on GO, executes in one transaction
   ConnectionStringResolver   option / file / environment, and password masking
@@ -490,7 +493,10 @@ warning comment, and you apply it twice or split it by hand.
 - [x] Credentials that stay off the command line
 - [x] Packaging as a `dotnet tool`
 - [x] `--include` / `--exclude` filters to narrow a comparison
-- [ ] More object types: triggers, sequences, synonyms, table types
+- [x] Triggers, sequences and table types
+- [x] A full script in dependency order, split into the phases a restore runs
+- [x] Live tests against a real SQL Server, in CI and locally
+- [ ] Synonyms
 - [ ] Extended properties
 - [ ] Property-level ignore rules (ignore collation, fill factor, and similar)
 - [ ] `--report` mode: a readable HTML diff alongside the script

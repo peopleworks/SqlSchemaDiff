@@ -48,6 +48,19 @@ var diff = new SchemaDiffer().Diff(
     addOnly: false);              // true = only add what is missing
 
 Console.WriteLine(diff.Script);
+
+// 4. keep a snapshot on disk, or feed one to a later diff
+await SnapshotSerializer.SaveAsync(source, "source.snapshot.json", ct);
+var fromDisk = await SnapshotSerializer.LoadAsync("source.snapshot.json", ct);
+
+// 5. script a whole database in the order a restore needs: schemas, types,
+//    sequences, tables, then indexes, checks and foreign keys after the rows
+var options = new ComposeOptions { ConstraintsAfterData = true, RestartSequences = true };
+foreach(var phase in ScriptComposer.ComposePhases(source, options))
+{
+    var sql = string.Join(Environment.NewLine + "GO" + Environment.NewLine, phase.Batches.Select(b => b.Sql));
+    File.WriteAllText(Path.Combine("schema", phase.FileName), sql);
+}
 ```
 
 `SqlBatchExecutor` applies a script in a single transaction — if any batch fails the whole
@@ -57,8 +70,11 @@ change rolls back — and `AuditLogger` records what ran.
 
 | Type | Does |
 |---|---|
-| `SqlServerSchemaExtractor` | Reads tables, columns, indexes, keys, constraints, views, procedures, functions and alias types into a `DatabaseSnapshot` |
+| `SqlServerSchemaExtractor` | Reads tables, columns, indexes, keys, constraints, views, procedures, functions, triggers, sequences, table types, alias types and schema owners into a `DatabaseSnapshot` |
 | `SchemaDiffer` | Compares two snapshots and composes the migration script, ordering objects by dependency |
+| `ScriptComposer` | Scripts a whole snapshot, as dependency-ordered phases (`ComposePhases`) or one file (`ComposeFullScript`) |
+| `DependencyOrder` | Topological sort with deterministic tie-breaks and cycle reporting, shared by the differ and the composer |
+| `SnapshotSerializer` | Saves and loads snapshots with the one set of JSON options that round-trips them, and a format version |
 | `TableDiffer` | The data-preserving part: column-level `ADD` / `ALTER COLUMN` / `DROP COLUMN` |
 | `ObjectFilter` | `[type:]glob` include/exclude patterns, applied to both sides |
 | `SqlBatchExecutor` · `SqlBatchSplitter` | Splits on `GO` and applies in one transaction |
@@ -72,7 +88,8 @@ Nothing is dropped unless asked. An object that exists only on the target is rep
 whole tables needs `includeTableDrops` on top of that. A table that cannot be reconciled with
 `ALTER` alone is refused unless `allowTableRebuild` is set.
 
-The namespaces are `SqlSchemaDiff.*`, matching the package: `SqlSchemaDiff.Models` and
-`SqlSchemaDiff.Services`.
+The package is `PeopleWorks.SqlSchemaDiff.Core` since 1.6.0. The assembly and the
+namespaces stay `SqlSchemaDiff.*` (`SqlSchemaDiff.Models`, `SqlSchemaDiff.Services`), so a
+1.5.0 consumer only changes its package reference.
 
 MIT licensed. Built by [PeopleWorks](https://github.com/peopleworks).
