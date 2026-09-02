@@ -225,8 +225,12 @@ conservative.
   on the target is reported as a `-- WARNING:` comment and left in place. `--include-drops`
   enables dropping them; dropping whole tables needs `--include-table-drops` on top.
 - **Tables are never rebuilt implicitly.** A changed table produces `ALTER` statements.
-  `--allow-table-rebuild` is the only way to get `DROP`/`CREATE`, and it says plainly that
-  it can lose data.
+  What `ALTER` cannot express — an identity property, for one — is refused with a warning
+  unless you pass `--allow-table-rebuild`, and since 1.6.0 that rebuild **keeps the rows**:
+  the table is created again under a temporary name with the new shape, the rows are
+  copied across, the original is dropped, the copy is renamed into its place, and its
+  keys, indexes, foreign keys and triggers are put back. The script says so at the top of
+  the block, and names what is not carried: permissions and extended properties.
 - **Risky changes are annotated in the script**, not buried in a log:
 
   ```sql

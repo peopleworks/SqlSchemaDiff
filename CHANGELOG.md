@@ -31,6 +31,14 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 - **`SnapshotSerializer`** saves and loads snapshots with the one set of JSON options
   that round-trips them, and stamps `FormatVersion` and `GeneratedBy`. The CLI uses it,
   and a NuGet consumer no longer has to duplicate the options to read a snapshot.
+- **A table rebuild that keeps the rows.** `--allow-table-rebuild` used to mean
+  `DROP TABLE` and `CREATE TABLE`, and it failed outright when any foreign key pointed at
+  the table. It now creates the table again under a temporary name with the new shape,
+  copies the rows across with `IDENTITY_INSERT` where the identity survives, drops the
+  inbound foreign keys, drops the original, renames the copy into place, and puts back the
+  keys, checks, indexes, foreign keys in both directions and the table's triggers. The
+  block starts with a comment that says why the table is rebuilt, how many columns are
+  copied and what is not carried: permissions and extended properties.
 - **Live tests against a real SQL Server.** `tests/SqlSchemaDiff.IntegrationTests`
   builds a database that exercises every supported construct, scripts it, restores it
   into an empty database and requires the two to compare equal. CI runs it against the
@@ -70,6 +78,14 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 - The module dependency query joined `sys.sql_expression_dependencies` to `sys.objects`
   without filtering on `referenced_class`, so a reference to a type could match an
   unrelated object that happened to share the id.
+- **An `ALTER COLUMN` on a column named in a check constraint failed with error 5074.**
+  The differ did not know a check touches its columns, so it never dropped and re-added
+  the check around the `ALTER`. It reads the columns out of the check's definition now.
+- **Disabled and untrusted constraints diffed as equal to enabled ones.** `is_disabled`
+  on foreign keys, checks and indexes and `is_not_trusted` on foreign keys now take part
+  in the comparison, and a flag-only difference is applied as a state change
+  (`NOCHECK CONSTRAINT`, `WITH CHECK CHECK CONSTRAINT`, `ALTER INDEX ... DISABLE` or
+  `REBUILD`) rather than as a drop and re-create.
 - The pocket guide's install command named a package that never existed.
 
 ## [1.5.0] - 2026-08-29

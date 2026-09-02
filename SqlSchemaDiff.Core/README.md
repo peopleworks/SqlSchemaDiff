@@ -44,7 +44,7 @@ var diff = new SchemaDiffer().Diff(
     source, target,
     includeDrops: false,          // target-only objects are reported, not dropped
     includeTableDrops: false,     // dropping whole tables needs this as well
-    allowTableRebuild: false,     // refuse a rebuild rather than lose rows
+    allowTableRebuild: false,     // false = refuse; true = rebuild with the rows copied
     addOnly: false);              // true = only add what is missing
 
 Console.WriteLine(diff.Script);
@@ -86,7 +86,8 @@ change rolls back — and `AuditLogger` records what ran.
 Nothing is dropped unless asked. An object that exists only on the target is reported as a
 `-- WARNING:` comment and left in place; `includeDrops` enables removing them, and dropping
 whole tables needs `includeTableDrops` on top of that. A table that cannot be reconciled with
-`ALTER` alone is refused unless `allowTableRebuild` is set.
+`ALTER` alone is refused unless `allowTableRebuild` is set, and then it is rebuilt with its
+rows copied into the new shape and its keys, indexes, foreign keys and triggers put back.
 
 The package is `PeopleWorks.SqlSchemaDiff.Core` since 1.6.0. The assembly and the
 namespaces stay `SqlSchemaDiff.*` (`SqlSchemaDiff.Models`, `SqlSchemaDiff.Services`), so a
