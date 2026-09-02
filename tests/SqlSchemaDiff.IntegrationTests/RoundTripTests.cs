@@ -41,6 +41,18 @@ public sealed class RoundTripTests
         // full of drops the other means the target picked up something extra.
         Snapshots.AssertNoChanges("target -> source", Compare(target, source));
 
+        // Convergence alone is not proof for the enabled/disabled flags: the differ
+        // does not compare is_disabled on foreign keys, checks or indexes, nor
+        // is_not_trusted on foreign keys, so a target that silently re-enabled them
+        // would still diff clean. Read the deployed state instead of trusting it.
+        var deployedAudit = target.Table("ops", "AuditEntry");
+        Assert.True(deployedAudit.ForeignKey("FK_AuditEntry_Invoice").IsNotTrusted,
+            "the WITH NOCHECK foreign key came back trusted on the target");
+        Assert.True(deployedAudit.ForeignKey("FK_AuditEntry_Customer").IsDisabled,
+            "the disabled foreign key came back enabled on the target");
+        Assert.True(deployedAudit.Check("CK_AuditEntry_EventKind").IsDisabled,
+            "the disabled check constraint came back enabled on the target");
+
         // And the deployment is idempotent: diffing again produces a script with no
         // statements, and running that script changes nothing.
         var second = Compare(source, target);
