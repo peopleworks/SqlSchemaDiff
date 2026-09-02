@@ -51,6 +51,8 @@ public sealed class TableDiffer
                     warnings.Add($"-- WARNING: new column [{col.Name}] is NOT NULL without a default; " +
                                  "ADD will fail if the table already has rows. Provide a default or backfill first.");
                 }
+
+                WarnIfSparseNotNull(col, warnings);
                 continue;
             }
 
@@ -88,7 +90,8 @@ public sealed class TableDiffer
             add: s => post.Add(SqlRender.BuildKeyConstraintAdd(source, s)),
             drop: t => pre.Add(SqlRender.BuildConstraintDrop(source, t.Name)),
             touches: x => x.Columns.Select(c => c.Name),
-            rewrittenColumns, includeDrops, ref changeCount, warnings, "key constraint");
+            rewrittenColumns, includeDrops, ref changeCount, warnings, "key constraint",
+            alterInPlace: (s, t) => TryAlterKeyConstraintInPlace(source, s, t, rewrittenColumns, post));
 
         // ---- Check constraints ----
         DiffNamed(
@@ -115,7 +118,22 @@ public sealed class TableDiffer
             add: s => post.Add(SqlRender.BuildIndexCreate(source, s)),
             drop: t => pre.Add(SqlRender.BuildIndexDrop(source, t)),
             touches: x => x.Columns.Select(c => c.Name),
-            rewrittenColumns, includeDrops, ref changeCount, warnings, "index");
+            rewrittenColumns, includeDrops, ref changeCount, warnings, "index",
+            alterInPlace: (s, t) => TryAlterIndexInPlace(source, s, t, rewrittenColumns, post));
+
+        // ---- Heap storage ----
+        // A heap has no index to carry its compression, so the setting lives on the
+        // table and only ALTER TABLE ... REBUILD can change it. This keys off the
+        // source alone: if the source has a clustered index the compression rides on
+        // that index and was handled above, and if the target had one that is being
+        // dropped, the heap it leaves behind still has to be rebuilt. The statement
+        // lands after the index work for exactly that reason.
+        if(SqlRender.IsHeap(source) &&
+           !SqlRender.CompressionEqual(source.DataCompression, target.DataCompression))
+        {
+            post.Add(SqlRender.BuildTableRebuild(source, source.DataCompression));
+            changeCount++;
+        }
 
         var script = Compose(source, pre, columnAdds, columnAlters, columnDrops, post, warnings);
         return new TableAlterResult
@@ -161,14 +179,21 @@ public sealed class TableDiffer
         var typeChanged = !string.Equals(srcType, tgtType, StringComparison.OrdinalIgnoreCase);
         var collationChanged = !string.Equals(src.CollationName, tgt.CollationName, StringComparison.OrdinalIgnoreCase);
         var nullabilityChanged = src.IsNullable != tgt.IsNullable;
+        var sparseChanged = src.IsSparse != tgt.IsSparse;
         var rewritten = false;
 
-        if(typeChanged || collationChanged || nullabilityChanged)
+        WarnIfSparseNotNull(src, warnings);
+
+        // An ALTER COLUMN that omits SPARSE clears the flag, so a column that is
+        // meant to stay sparse has to restate it on every rewrite.
+        if(typeChanged || collationChanged || nullabilityChanged || (sparseChanged && src.IsSparse))
         {
             var sb = new StringBuilder();
             sb.Append($"ALTER TABLE {tableId} ALTER COLUMN {SqlRender.Quote(src.Name)} {srcType}");
             if(!string.IsNullOrWhiteSpace(src.CollationName) && !src.IsUserDefinedType)
                 sb.Append($" COLLATE {src.CollationName}");
+            if(src.IsSparse)
+                sb.Append(" SPARSE");
             sb.Append(src.IsNullable ? " NULL" : " NOT NULL");
             sb.Append(';');
             columnAlters.Add(sb.ToString());
@@ -178,6 +203,16 @@ public sealed class TableDiffer
                 warnings.Add($"-- WARNING: column [{src.Name}] becomes NOT NULL; ALTER fails if it contains NULLs. Backfill first.");
             if(typeChanged && IsNarrowing(src, tgt))
                 warnings.Add($"-- WARNING: column [{src.Name}] type narrows ({tgtType} -> {srcType}); review for data truncation.");
+        }
+
+        // Turning sparse off gets its own statement: DROP SPARSE leaves the rest of
+        // the column definition alone. It is emitted after a type rewrite too - the
+        // rewrite already clears the flag, but DROP SPARSE on a column that is not
+        // sparse is a no-op, and saying it makes the script's intent explicit.
+        if(sparseChanged && !src.IsSparse)
+        {
+            columnAlters.Add($"ALTER TABLE {tableId} ALTER COLUMN {SqlRender.Quote(src.Name)} DROP SPARSE;");
+            rewritten = true;
         }
 
         // Default constraint change (separate from ALTER COLUMN).
@@ -196,12 +231,19 @@ public sealed class TableDiffer
         return rewritten;
     }
 
+    /// <param name="alterInPlace">
+    /// Given the source and target versions of an object that differ, emits the
+    /// statements that reconcile them without a drop and re-create, and returns true
+    /// when it did. Used for index storage options, which ALTER INDEX can change on
+    /// an index that is already there.
+    /// </param>
     private static void DiffNamed<T>(
         List<T> source, List<T> target, Func<T, string> matchKey,
         Func<T, T, bool> equal, Action<T> add, Action<T> drop,
         Func<T, IEnumerable<string>> touches,
         HashSet<string> rewrittenColumns,
-        bool includeDrops, ref int changeCount, List<string> warnings, string label)
+        bool includeDrops, ref int changeCount, List<string> warnings, string label,
+        Func<T, T, bool>? alterInPlace = null)
     {
         var targetByKey = ToDict(target, matchKey);
         var sourceByKey = ToDict(source, matchKey);
@@ -227,9 +269,13 @@ public sealed class TableDiffer
                 continue;
             }
 
-            // Changed: drop then re-add.
-            drop(t);
-            add(s);
+            // Changed: reconcile in place when that is possible, otherwise drop
+            // then re-add.
+            if(alterInPlace is null || !alterInPlace(s, t))
+            {
+                drop(t);
+                add(s);
+            }
             changeCount++;
         }
 
@@ -259,6 +305,66 @@ public sealed class TableDiffer
 
     private static bool DependsOnRewrittenColumn<T>(T item, Func<T, IEnumerable<string>> touches, HashSet<string> rewrittenColumns) =>
         rewrittenColumns.Count > 0 && touches(item).Any(rewrittenColumns.Contains);
+
+    // ------------------------------------------------- in-place index alters
+
+    /// <summary>
+    /// Reconciles a PRIMARY KEY or UNIQUE constraint whose index differs only in its
+    /// storage options. Dropping a key and putting it back also drops and re-checks
+    /// every foreign key pointing at it, so avoiding that is worth the special case.
+    /// </summary>
+    private static bool TryAlterKeyConstraintInPlace(
+        TableModel table, KeyConstraintModel src, KeyConstraintModel tgt,
+        HashSet<string> rewrittenColumns, List<string> statements)
+    {
+        if(!KeyConstraintShapeEqual(src, tgt) ||
+           DependsOnRewrittenColumn(tgt, x => x.Columns.Select(c => c.Name), rewrittenColumns))
+            return false;
+
+        return AppendIndexOptionAlters(table, tgt.Name, src, tgt, isColumnstore: false, statements);
+    }
+
+    /// <summary>
+    /// Reconciles an index that differs only in its storage options. A fill factor or
+    /// compression change is a rebuild either way; going through ALTER INDEX saves
+    /// the re-sort a drop and re-create would add on top of it.
+    /// </summary>
+    private static bool TryAlterIndexInPlace(
+        TableModel table, IndexModel src, IndexModel tgt,
+        HashSet<string> rewrittenColumns, List<string> statements)
+    {
+        if(!IndexShapeEqual(src, tgt) ||
+           DependsOnRewrittenColumn(tgt, x => x.Columns.Select(c => c.Name), rewrittenColumns))
+            return false;
+
+        return AppendIndexOptionAlters(table, tgt.Name, src, tgt, SqlRender.IsColumnstore(tgt.TypeDesc), statements);
+    }
+
+    /// <summary>
+    /// The target's name is the one that exists on the target server, so it is the
+    /// one ALTER INDEX has to use - which matters for a system-named constraint,
+    /// where the two sides never share a name.
+    /// </summary>
+    private static bool AppendIndexOptionAlters(
+        TableModel table, string indexName,
+        IIndexStorageOptions src, IIndexStorageOptions tgt, bool isColumnstore, List<string> statements)
+    {
+        var alters = SqlRender.BuildIndexOptionsAlter(table, indexName, src, tgt, isColumnstore);
+        if(alters.Count == 0)
+            return false;
+
+        statements.AddRange(alters);
+        return true;
+    }
+
+    private static void WarnIfSparseNotNull(ColumnModel column, List<string> warnings)
+    {
+        if(column.IsSparse && !column.IsNullable)
+        {
+            warnings.Add($"-- WARNING: column [{column.Name}] is SPARSE but NOT NULL; " +
+                         "SQL Server only allows SPARSE on a nullable column and will reject the statement.");
+        }
+    }
 
     private static string DisplayName<T>(T item) => item switch
     {
@@ -333,9 +439,18 @@ public sealed class TableDiffer
         NormalizedEqual(a.ComputedDefinition ?? "", b.ComputedDefinition ?? "") &&
         a.IsPersisted == b.IsPersisted &&
         a.IsRowGuid == b.IsRowGuid &&
+        a.IsSparse == b.IsSparse &&
         NormalizedEqual(a.DefaultDefinition ?? "", b.DefaultDefinition ?? "");
 
     private static bool KeyConstraintsEqual(KeyConstraintModel a, KeyConstraintModel b) =>
+        KeyConstraintShapeEqual(a, b) && IndexOptionsEqual(a, b);
+
+    /// <summary>
+    /// Everything about a key constraint that only a drop and re-create can change.
+    /// Split out from <see cref="KeyConstraintsEqual"/> so the differ can tell a
+    /// storage-option change, which ALTER INDEX handles, from a real one.
+    /// </summary>
+    private static bool KeyConstraintShapeEqual(KeyConstraintModel a, KeyConstraintModel b) =>
         a.TypeCode == b.TypeCode &&
         SqlRender.IsClustered(a.IndexTypeDesc) == SqlRender.IsClustered(b.IndexTypeDesc) &&
         ColumnListEqual(a.Columns, b.Columns);
@@ -350,10 +465,27 @@ public sealed class TableDiffer
             .SequenceEqual(b.Columns.Select(x => $"{x.ParentColumn}>{x.ReferencedColumn}"), StringComparer.OrdinalIgnoreCase);
 
     private static bool IndexesEqual(IndexModel a, IndexModel b) =>
+        IndexShapeEqual(a, b) && IndexOptionsEqual(a, b);
+
+    /// <summary>Everything about an index that only a drop and re-create can change.</summary>
+    private static bool IndexShapeEqual(IndexModel a, IndexModel b) =>
         a.IsUnique == b.IsUnique &&
         string.Equals(a.TypeDesc, b.TypeDesc, StringComparison.OrdinalIgnoreCase) &&
         NormalizedEqual(a.FilterDefinition ?? "", b.FilterDefinition ?? "") &&
         ColumnListEqual(a.Columns, b.Columns);
+
+    /// <summary>
+    /// Compares the <c>WITH (...)</c> options of two indexes. Each property defaults
+    /// to what SQL Server itself would use, so a snapshot written before these were
+    /// captured compares equal to a freshly extracted index left at the defaults.
+    /// </summary>
+    private static bool IndexOptionsEqual(IIndexStorageOptions a, IIndexStorageOptions b) =>
+        a.FillFactor == b.FillFactor &&
+        a.IsPadded == b.IsPadded &&
+        a.IgnoreDupKey == b.IgnoreDupKey &&
+        a.AllowRowLocks == b.AllowRowLocks &&
+        a.AllowPageLocks == b.AllowPageLocks &&
+        SqlRender.CompressionEqual(a.DataCompression, b.DataCompression);
 
     private static bool ColumnListEqual(List<IndexColumnModel> a, List<IndexColumnModel> b) =>
         a.Count == b.Count &&

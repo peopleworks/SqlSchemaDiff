@@ -26,10 +26,11 @@ public sealed class SqlServerSchemaExtractor
         var tables = await GetTablesAsync(connection, cancellationToken);
         var columns = await GetColumnsAsync(connection, cancellationToken);
         var indexColumns = await GetIndexColumnsAsync(connection, cancellationToken);
-        var keyConstraints = await GetKeyConstraintsAsync(connection, indexColumns, cancellationToken);
+        var compression = await GetDataCompressionAsync(connection, cancellationToken);
+        var keyConstraints = await GetKeyConstraintsAsync(connection, indexColumns, compression, cancellationToken);
         var foreignKeys = await GetForeignKeysAsync(connection, cancellationToken);
         var checkConstraints = await GetCheckConstraintsAsync(connection, cancellationToken);
-        var indexes = await GetIndexesAsync(connection, indexColumns, cancellationToken);
+        var indexes = await GetIndexesAsync(connection, indexColumns, compression, cancellationToken);
 
         var objects = new List<DbSchemaObject>();
         foreach(var table in tables)
@@ -42,7 +43,11 @@ public sealed class SqlServerSchemaExtractor
                 KeyConstraints = Take(keyConstraints, table.ObjectId),
                 ForeignKeys = Take(foreignKeys, table.ObjectId),
                 CheckConstraints = Take(checkConstraints, table.ObjectId),
-                Indexes = Take(indexes, table.ObjectId)
+                Indexes = Take(indexes, table.ObjectId),
+                // index_id 0 is a heap, 1 a clustered index; a table has exactly one
+                // of the two and its compression is the table's own.
+                DataCompression = LookupCompression(compression, table.ObjectId, 0)
+                                  ?? LookupCompression(compression, table.ObjectId, 1)
             };
 
             var dependencies = model.ForeignKeys
@@ -162,7 +167,8 @@ public sealed class SqlServerSchemaExtractor
                                dc.definition AS default_definition,
                                dc.is_system_named AS default_is_system_named,
                                CONVERT(varchar(100), ic.seed_value) AS seed_value_text,
-                               CONVERT(varchar(100), ic.increment_value) AS increment_value_text
+                               CONVERT(varchar(100), ic.increment_value) AS increment_value_text,
+                               c.is_sparse
                            FROM sys.columns c
                            INNER JOIN sys.tables t ON t.object_id = c.object_id AND t.is_ms_shipped = 0
                            INNER JOIN sys.types ty ON c.user_type_id = ty.user_type_id
@@ -199,7 +205,8 @@ public sealed class SqlServerSchemaExtractor
                 DefaultDefinition = reader.IsDBNull(16) ? null : reader.GetString(16),
                 DefaultIsSystemNamed = !reader.IsDBNull(17) && reader.GetBoolean(17),
                 IdentitySeed = reader.IsDBNull(18) ? null : reader.GetString(18),
-                IdentityIncrement = reader.IsDBNull(19) ? null : reader.GetString(19)
+                IdentityIncrement = reader.IsDBNull(19) ? null : reader.GetString(19),
+                IsSparse = reader.GetBoolean(20)
             }));
         }
 
@@ -211,6 +218,7 @@ public sealed class SqlServerSchemaExtractor
     private static async Task<ILookup<int, KeyConstraintModel>> GetKeyConstraintsAsync(
         SqlConnection connection,
         Dictionary<(int ObjectId, int IndexId), List<IndexColumnModel>> indexColumns,
+        Dictionary<(int ObjectId, int IndexId), string> compression,
         CancellationToken cancellationToken)
     {
         const string sql = """
@@ -220,7 +228,12 @@ public sealed class SqlServerSchemaExtractor
                                kc.type,
                                kc.unique_index_id,
                                i.type_desc,
-                               kc.is_system_named
+                               kc.is_system_named,
+                               i.fill_factor,
+                               i.is_padded,
+                               i.ignore_dup_key,
+                               i.allow_row_locks,
+                               i.allow_page_locks
                            FROM sys.key_constraints kc
                            INNER JOIN sys.tables t ON t.object_id = kc.parent_object_id AND t.is_ms_shipped = 0
                            INNER JOIN sys.indexes i
@@ -243,7 +256,13 @@ public sealed class SqlServerSchemaExtractor
                 TypeCode = reader.GetString(2).Trim(),
                 IndexTypeDesc = reader.GetString(4),
                 IsSystemNamed = reader.GetBoolean(5),
-                Columns = Lookup(indexColumns, parentObjectId, indexId).Where(x => !x.IsIncluded).ToList()
+                Columns = Lookup(indexColumns, parentObjectId, indexId).Where(x => !x.IsIncluded).ToList(),
+                FillFactor = reader.GetByte(6),
+                IsPadded = reader.GetBoolean(7),
+                IgnoreDupKey = reader.GetBoolean(8),
+                AllowRowLocks = reader.GetBoolean(9),
+                AllowPageLocks = reader.GetBoolean(10),
+                DataCompression = LookupCompression(compression, parentObjectId, indexId)
             }));
         }
 
@@ -373,6 +392,7 @@ public sealed class SqlServerSchemaExtractor
     private async Task<ILookup<int, IndexModel>> GetIndexesAsync(
         SqlConnection connection,
         Dictionary<(int ObjectId, int IndexId), List<IndexColumnModel>> indexColumns,
+        Dictionary<(int ObjectId, int IndexId), string> compression,
         CancellationToken cancellationToken)
     {
         const string sql = """
@@ -386,7 +406,12 @@ public sealed class SqlServerSchemaExtractor
                                i.is_disabled,
                                i.type,
                                s.name AS schema_name,
-                               t.name AS table_name
+                               t.name AS table_name,
+                               i.fill_factor,
+                               i.is_padded,
+                               i.ignore_dup_key,
+                               i.allow_row_locks,
+                               i.allow_page_locks
                            FROM sys.indexes i
                            INNER JOIN sys.tables t ON t.object_id = i.object_id AND t.is_ms_shipped = 0
                            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
@@ -408,13 +433,14 @@ public sealed class SqlServerSchemaExtractor
             var name = reader.GetString(2);
             var indexType = reader.GetByte(7);
 
-            // 1 = clustered rowstore, 2 = nonclustered rowstore. Columnstore, XML,
-            // spatial and hash indexes need syntax this renderer does not emit, so
-            // they are reported rather than silently dropped from the snapshot.
-            if(indexType is not (1 or 2))
+            // 1 = clustered rowstore, 2 = nonclustered rowstore, 5 = clustered
+            // columnstore, 6 = nonclustered columnstore. XML, spatial and hash
+            // indexes need syntax this renderer does not emit, so they are reported
+            // rather than silently dropped from the snapshot.
+            if(indexType is not (1 or 2 or 5 or 6))
             {
                 Notices.Add($"skipped index [{name}] on [{reader.GetString(8)}].[{reader.GetString(9)}]: " +
-                            $"unsupported index type {reader.GetString(4)}");
+                            $"{DescribeIndexKind(indexType, reader.GetString(4))} indexes are not scripted");
                 continue;
             }
 
@@ -425,7 +451,16 @@ public sealed class SqlServerSchemaExtractor
                 TypeDesc = reader.GetString(4),
                 FilterDefinition = reader.IsDBNull(5) ? null : reader.GetString(5),
                 IsDisabled = reader.GetBoolean(6),
-                Columns = Lookup(indexColumns, objectId, indexId)
+                // A clustered columnstore index covers the whole table implicitly and
+                // is scripted with no column list. Capturing the list anyway would
+                // make every added column read as a change to the index.
+                Columns = indexType == 5 ? new List<IndexColumnModel>() : Lookup(indexColumns, objectId, indexId),
+                FillFactor = reader.GetByte(10),
+                IsPadded = reader.GetBoolean(11),
+                IgnoreDupKey = reader.GetBoolean(12),
+                AllowRowLocks = reader.GetBoolean(13),
+                AllowPageLocks = reader.GetBoolean(14),
+                DataCompression = LookupCompression(compression, objectId, indexId)
             }));
         }
 
@@ -476,6 +511,48 @@ public sealed class SqlServerSchemaExtractor
 
         return result;
     }
+
+    /// <summary>
+    /// Compression per index, from partition 1. Partitioned tables can compress each
+    /// partition differently; only the first is captured, because the renderer emits
+    /// a single unqualified DATA_COMPRESSION and a partition scheme is out of scope.
+    /// </summary>
+    private static async Task<Dictionary<(int ObjectId, int IndexId), string>> GetDataCompressionAsync(
+        SqlConnection connection, CancellationToken cancellationToken)
+    {
+        const string sql = """
+                           SELECT
+                               p.object_id,
+                               p.index_id,
+                               p.data_compression_desc
+                           FROM sys.partitions p
+                           INNER JOIN sys.tables t ON t.object_id = p.object_id AND t.is_ms_shipped = 0
+                           WHERE p.partition_number = 1;
+                           """;
+
+        var result = new Dictionary<(int ObjectId, int IndexId), string>();
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while(await reader.ReadAsync(cancellationToken))
+        {
+            if(reader.IsDBNull(2))
+                continue;
+
+            result[(reader.GetInt32(0), reader.GetInt32(1))] = reader.GetString(2);
+        }
+
+        return result;
+    }
+
+    /// <summary>Names an index kind for a notice about one this renderer skips.</summary>
+    private static string DescribeIndexKind(byte indexType, string typeDesc) => indexType switch
+    {
+        3 => "XML",
+        4 => "spatial",
+        7 => "memory-optimized hash",
+        _ => typeDesc
+    };
 
     // ----------------------------------------------------------- alias types
 
@@ -654,6 +731,14 @@ public sealed class SqlServerSchemaExtractor
     private static List<IndexColumnModel> Lookup(
         Dictionary<(int ObjectId, int IndexId), List<IndexColumnModel>> source, int objectId, int indexId) =>
         source.TryGetValue((objectId, indexId), out var columns) ? columns : new List<IndexColumnModel>();
+
+    /// <summary>
+    /// Null when nothing was captured for that index, which the renderer and the
+    /// differ both read as "uncompressed".
+    /// </summary>
+    private static string? LookupCompression(
+        Dictionary<(int ObjectId, int IndexId), string> source, int objectId, int indexId) =>
+        source.TryGetValue((objectId, indexId), out var value) ? value : null;
 
     private static string BuildKey(DbObjectType type, string schema, string name) => $"{type}:{schema}.{name}";
 
