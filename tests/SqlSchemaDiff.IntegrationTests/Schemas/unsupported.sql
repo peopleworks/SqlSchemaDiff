@@ -1,7 +1,8 @@
 -- ===========================================================================
--- Constructs the extractor knows about but does not model yet. Each one has to
--- come back as a notice rather than an exception or a silent omission, so the
--- caller can see what was left out of the snapshot.
+-- Constructs at the edge of what the extractor models. A columnstore index is
+-- captured since 1.6 and must come back typed as one; a system-versioned table
+-- is captured with its flags but not scripted, so it has to come back as a
+-- notice rather than an exception or a silent omission.
 --
 -- Split into two batches on purpose: the test runs them one at a time and skips
 -- the matching assertion when an edition refuses the feature.

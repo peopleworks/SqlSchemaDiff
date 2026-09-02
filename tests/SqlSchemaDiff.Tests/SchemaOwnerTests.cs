@@ -12,7 +12,9 @@ public class SchemaOwnerRenderTests
         var statement = SqlRender.BuildSchemaCreate("app", "app_owner");
 
         Assert.Contains("IF SCHEMA_ID(N'app') IS NULL", statement);
-        Assert.Contains("EXEC(N'CREATE SCHEMA [app] AUTHORIZATION [app_owner]');", statement);
+        Assert.Contains("IF DATABASE_PRINCIPAL_ID(N'app_owner') IS NOT NULL", statement);
+        Assert.Contains("EXEC(N'CREATE SCHEMA [app] AUTHORIZATION [app_owner]')", statement);
+        Assert.Contains("ELSE", statement);
     }
 
     // dbo is the default owner, and naming a principal the target may not have turns
@@ -34,7 +36,8 @@ public class SchemaOwnerRenderTests
         var statement = SqlRender.BuildSchemaCreate("o'brien", "o'neil");
 
         Assert.Contains("IF SCHEMA_ID(N'o''brien') IS NULL", statement);
-        Assert.Contains("EXEC(N'CREATE SCHEMA [o''brien] AUTHORIZATION [o''neil]');", statement);
+        Assert.Contains("DATABASE_PRINCIPAL_ID(N'o''neil')", statement);
+        Assert.Contains("EXEC(N'CREATE SCHEMA [o''brien] AUTHORIZATION [o''neil]')", statement);
     }
 }
 

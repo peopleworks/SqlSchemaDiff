@@ -62,4 +62,12 @@ public sealed class ComposeOptions
     /// </para>
     /// </summary>
     public bool ConstraintsAfterData { get; init; }
+
+    /// <summary>
+    /// When true, the finalize phase restarts every sequence at the value the
+    /// source had handed out, so numbering continues where it left off. Off by
+    /// default: a schema-only script has no reason to move a sequence, and a
+    /// restore that loads rows is the one caller that wants it.
+    /// </summary>
+    public bool RestartSequences { get; init; }
 }

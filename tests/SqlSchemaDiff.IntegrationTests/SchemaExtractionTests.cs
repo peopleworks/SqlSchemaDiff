@@ -22,14 +22,19 @@ public sealed class SchemaExtractionTests
         var (snapshot, notices) = await SqlServerFixture.ExtractWithNoticesAsync(connectionString);
 
         // ---- counts -------------------------------------------------------
-        Assert.Equal(4, snapshot.Count(DbObjectType.Table));
+        Assert.Equal(5, snapshot.Count(DbObjectType.Table));
         Assert.Equal(3, snapshot.Count(DbObjectType.View));
         Assert.Equal(3, snapshot.Count(DbObjectType.Function));
-        Assert.Equal(2, snapshot.Count(DbObjectType.StoredProcedure));
-        Assert.Equal(12, snapshot.Objects.Count);
+        Assert.Equal(3, snapshot.Count(DbObjectType.StoredProcedure));
+        Assert.Equal(2, snapshot.Count(DbObjectType.Trigger));
+        Assert.Equal(1, snapshot.Count(DbObjectType.Sequence));
+        Assert.Equal(1, snapshot.Count(DbObjectType.TableType));
+        Assert.Equal(18, snapshot.Objects.Count);
 
         // ---- prerequisites ------------------------------------------------
         Assert.Equal(new[] { "ops", "sales" }, snapshot.Schemas);
+        Assert.NotNull(snapshot.SchemaOwners);
+        Assert.Equal("ops_owner", snapshot.SchemaOwners!["ops"]);
 
         var accountCode = Assert.Single(snapshot.Types, x => x.Name == "AccountCode");
         Assert.Equal("varchar", accountCode.BaseTypeName);
@@ -170,6 +175,42 @@ public sealed class SchemaExtractionTests
             "SELECT CONVERT(int, uses_quoted_identifier) FROM sys.sql_modules WHERE object_id = OBJECT_ID(N'ops.uspTouchAudit');");
         Assert.Equal(0, quotedIdentifierOff);
 
+        // ---- sequences ----------------------------------------------------
+        var sequence = snapshot.Object(DbObjectType.Sequence, "sales", "InvoiceNumber").Sequence;
+        Assert.NotNull(sequence);
+        Assert.Equal("int", sequence!.TypeName);
+        Assert.Equal("1000", sequence.StartValue);
+        Assert.Equal("1", sequence.Increment);
+        Assert.False(sequence.IsCycling);
+        Assert.True(sequence.IsCached);
+        Assert.Equal(20, sequence.CacheSize);
+
+        // The default is the only place the edge exists, so it has to be parsed out.
+        Assert.Contains("Sequence:sales.InvoiceNumber",
+            snapshot.Object(DbObjectType.Table, "ops", "Ticket").Dependencies);
+
+        // ---- table types --------------------------------------------------
+        var lineList = snapshot.Object(DbObjectType.TableType, "sales", "InvoiceLineList").TableType;
+        Assert.NotNull(lineList);
+        Assert.Equal(3, lineList!.Columns.Count);
+        Assert.Single(lineList.KeyConstraints);
+        Assert.Single(lineList.CheckConstraints);
+        Assert.Contains("TableType:sales.InvoiceLineList",
+            snapshot.Object(DbObjectType.StoredProcedure, "sales", "uspAddInvoiceLines").Dependencies);
+
+        // ---- triggers -----------------------------------------------------
+        var touch = snapshot.Object(DbObjectType.Trigger, "sales", "trCustomerTouch");
+        Assert.NotNull(touch.Trigger);
+        Assert.Equal("Customer", touch.Trigger!.ParentName);
+        Assert.False(touch.Trigger.IsDisabled);
+        Assert.False(touch.Trigger.IsInsteadOf);
+        Assert.Contains("Table:sales.Customer", touch.Dependencies);
+
+        var blockDelete = snapshot.Object(DbObjectType.Trigger, "ops", "trAuditEntryBlockDelete").Trigger;
+        Assert.NotNull(blockDelete);
+        Assert.True(blockDelete!.IsDisabled);
+        Assert.True(blockDelete.IsInsteadOf);
+
         // ---- notices ------------------------------------------------------
         Assert.True(notices.Count == 0, $"unexpected extraction notices: {string.Join(" | ", notices)}");
     }
@@ -197,11 +238,11 @@ public sealed class SchemaExtractionTests
 
         if(columnstoreCreated)
         {
-            // The table itself is captured; only the index it cannot render is skipped.
-            var fact = snapshot.Table("dbo", "Fact");
-            Assert.DoesNotContain(fact.Indexes, x => x.Name == "CSX_Fact_Amount");
-            Assert.Contains("CSX_Fact_Amount", joined);
-            Assert.Contains("COLUMNSTORE", joined, StringComparison.OrdinalIgnoreCase);
+            // Captured since 1.6: the index comes back typed as columnstore, and
+            // nothing about it is reported as left out.
+            var columnstore = snapshot.Table("dbo", "Fact").Index("CSX_Fact_Amount");
+            Assert.Contains("COLUMNSTORE", columnstore.TypeDesc, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("CSX_Fact_Amount", joined);
         }
 
         if(temporalCreated)

@@ -91,6 +91,7 @@ internal static class ProgramMain
             Schemas = snapshot.Schemas,
             Types = snapshot.Types,
             Objects = snapshot.Objects,
+            SchemaOwners = snapshot.SchemaOwners,
             FormatVersion = snapshot.FormatVersion,
             GeneratedBy = generatedBy
         };
@@ -348,9 +349,14 @@ internal static class ProgramMain
         var views = snapshot.Objects.Count(x => x.Type == DbObjectType.View);
         var procedures = snapshot.Objects.Count(x => x.Type == DbObjectType.StoredProcedure);
         var functions = snapshot.Objects.Count(x => x.Type == DbObjectType.Function);
+        var triggers = snapshot.Objects.Count(x => x.Type == DbObjectType.Trigger);
+        var sequences = snapshot.Objects.Count(x => x.Type == DbObjectType.Sequence);
+        var tableTypes = snapshot.Objects.Count(x => x.Type == DbObjectType.TableType);
 
         Console.WriteLine($"[{label}] Database [{snapshot.DatabaseName}]");
-        Console.WriteLine($"Objects: tables={tables}, views={views}, procs={procedures}, funcs={functions}");
+        Console.WriteLine(
+            $"Objects: tables={tables}, views={views}, procs={procedures}, funcs={functions}, " +
+            $"triggers={triggers}, sequences={sequences}, table types={tableTypes}");
         if(snapshot.Schemas.Count > 0)
             Console.WriteLine($"Schemas: {string.Join(", ", snapshot.Schemas)}");
         if(snapshot.Types.Count > 0)
@@ -427,7 +433,8 @@ internal static class ProgramMain
             Narrowing the comparison (all commands except apply and check-conn):
               --include <patterns>       Compare only what matches. Comma-separated.
               --exclude <patterns>       Skip what matches, applied after --include.
-              A pattern is [type:]glob, where type is table/view/proc/func and glob
+              A pattern is [type:]glob, where type is table/view/proc/func/trigger/
+              sequence/tabletype and glob
               takes * and ? and matches either schema.name or the bare name:
                 --include "Sales.*"              only the Sales schema
                 --exclude "proc:usp_Temp*,dbo.Audit*"

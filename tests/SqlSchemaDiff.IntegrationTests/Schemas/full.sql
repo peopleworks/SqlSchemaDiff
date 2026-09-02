@@ -6,15 +6,21 @@
 -- exists because it has its own branch in the extractor or the renderer, so if
 -- you add one to the engine, add it here too.
 --
--- Deliberately NOT here: triggers, sequences, table types, columnstore and
--- temporal tables. The extractor does not model them yet; the ones it reports as
--- notices are covered by their own test in a throwaway database.
+-- Deliberately NOT here: temporal and memory-optimized tables. The extractor
+-- captures their flags but does not script them yet, and reports them as
+-- notices; they are covered by their own test in a throwaway database.
 -- ===========================================================================
 
 CREATE SCHEMA sales;
 GO
 
-CREATE SCHEMA ops;
+-- A schema owned by a principal other than dbo. The owner is captured, and the
+-- scripts name it only when the target has the principal, so a restore into an
+-- empty database still gets the schema and the drift report says who owns it.
+CREATE USER ops_owner WITHOUT LOGIN;
+GO
+
+CREATE SCHEMA ops AUTHORIZATION ops_owner;
 GO
 
 -- Two alias types on purpose: a string one, which sys.types reports with a
@@ -24,6 +30,26 @@ CREATE TYPE sales.AccountCode FROM varchar(20) NOT NULL;
 GO
 
 CREATE TYPE sales.Amount FROM decimal(19, 4) NULL;
+GO
+
+-- ---------------------------------------------------------------- sequences
+
+-- Referenced by a default on ops.Ticket, so the sequence has to exist before the
+-- table. The catalog records no such edge: it comes from reading the default.
+CREATE SEQUENCE sales.InvoiceNumber AS int
+    START WITH 1000 INCREMENT BY 1 MINVALUE 1 NO MAXVALUE NO CYCLE CACHE 20;
+GO
+
+-- -------------------------------------------------------------- table types
+
+-- Constraints inline and unnamed: a table type cannot be altered, so its whole
+-- definition is one statement and any change is a drop and create.
+CREATE TYPE sales.InvoiceLineList AS TABLE
+(
+    Sku       varchar(60)    NOT NULL PRIMARY KEY,
+    Qty       int            NOT NULL CHECK (Qty > 0),
+    UnitPrice decimal(19, 4) NULL
+);
 GO
 
 -- ------------------------------------------------------------------- tables
@@ -98,6 +124,16 @@ CREATE TABLE ops.AuditEntry
     Payload    varchar(max) NULL,
     OccurredAt datetime2(3) NOT NULL CONSTRAINT DF_AuditEntry_OccurredAt DEFAULT (SYSUTCDATETIME()),
     CONSTRAINT PK_AuditEntry PRIMARY KEY CLUSTERED (AuditId)
+);
+GO
+
+-- Defaults to the sequence, so the create order has to put sales.InvoiceNumber
+-- ahead of this table.
+CREATE TABLE ops.Ticket
+(
+    TicketId int           NOT NULL CONSTRAINT DF_Ticket_TicketId DEFAULT (NEXT VALUE FOR sales.InvoiceNumber),
+    Title    nvarchar(100) NOT NULL,
+    CONSTRAINT PK_Ticket PRIMARY KEY CLUSTERED (TicketId)
 );
 GO
 
@@ -247,4 +283,49 @@ BEGIN
     LEFT JOIN sales.vInvoiceTotalsByCustomer AS t ON t.CustomerId = c.CustomerId
     WHERE c.CustomerId = @customerId;
 END;
+GO
+
+-- Takes the table type as a parameter: the type has to exist before the procedure
+-- and cannot be dropped while the procedure does.
+CREATE PROCEDURE sales.uspAddInvoiceLines
+    @lines sales.InvoiceLineList READONLY
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT COUNT(*) AS LineCount FROM @lines;
+END;
+GO
+
+-- ----------------------------------------------------------------- triggers
+
+-- An enabled AFTER trigger that writes into another schema.
+CREATE TRIGGER sales.trCustomerTouch
+ON sales.Customer
+AFTER UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    INSERT INTO ops.AuditEntry (EventKind, CustomerId)
+    SELECT N'customer.update', i.CustomerId
+    FROM inserted AS i;
+END;
+GO
+
+-- An INSTEAD OF trigger created and then disabled. The state is not part of the
+-- module text, so the round trip has to carry it separately and re-apply it
+-- after every create or alter.
+CREATE TRIGGER ops.trAuditEntryBlockDelete
+ON ops.AuditEntry
+INSTEAD OF DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    RAISERROR (N'audit rows are immutable', 16, 1);
+END;
+GO
+
+DISABLE TRIGGER ops.trAuditEntryBlockDelete ON ops.AuditEntry;
 GO

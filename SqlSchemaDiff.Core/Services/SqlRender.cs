@@ -100,13 +100,25 @@ public static class SqlRender
     /// </summary>
     public static string BuildSchemaCreate(string schema, string? owner)
     {
-        var authorization = string.IsNullOrWhiteSpace(owner) || string.Equals(owner, "dbo", StringComparison.OrdinalIgnoreCase)
-            ? string.Empty
-            : $" AUTHORIZATION {Quote(owner)}";
+        var create = $"CREATE SCHEMA {Quote(schema)}";
+        if(string.IsNullOrWhiteSpace(owner) || string.Equals(owner, "dbo", StringComparison.OrdinalIgnoreCase))
+        {
+            return
+                $"IF SCHEMA_ID(N'{Literal(schema)}') IS NULL{Environment.NewLine}" +
+                $"    EXEC(N'{Literal(create)}');";
+        }
 
+        // The owner is named only when the target has the principal. A restore into
+        // an empty database, or into one whose users were never scripted, still gets
+        // its schema; the drift report then says who owns it on each side.
         return
             $"IF SCHEMA_ID(N'{Literal(schema)}') IS NULL{Environment.NewLine}" +
-            $"    EXEC(N'{Literal($"CREATE SCHEMA {Quote(schema)}{authorization}")}');";
+            $"BEGIN{Environment.NewLine}" +
+            $"    IF DATABASE_PRINCIPAL_ID(N'{Literal(owner)}') IS NOT NULL{Environment.NewLine}" +
+            $"        EXEC(N'{Literal($"{create} AUTHORIZATION {Quote(owner)}")}'){Environment.NewLine}" +
+            $"    ELSE{Environment.NewLine}" +
+            $"        EXEC(N'{Literal(create)}'){Environment.NewLine}" +
+            $"END";
     }
 
     /// <summary>A guarded <c>CREATE TYPE</c> for a user-defined alias type.</summary>

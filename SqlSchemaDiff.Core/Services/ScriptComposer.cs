@@ -101,12 +101,16 @@ public static class ScriptComposer
         var batches = Phases.ToDictionary(x => x.Id, _ => new List<ScriptBatch>());
         void Add(PhaseId phase, ScriptBatch batch) => batches[phase].Add(batch);
 
+        var owners = snapshot.SchemaOwners is null
+            ? null
+            : new Dictionary<string, string>(snapshot.SchemaOwners, StringComparer.OrdinalIgnoreCase);
+
         foreach(var schema in snapshot.Schemas)
         {
             Add(PhaseId.Schemas, new ScriptBatch
             {
                 Describe = $"Schema {SqlRender.Quote(schema)}",
-                Sql = SqlRender.BuildSchemaCreate(schema)
+                Sql = SqlRender.BuildSchemaCreate(schema, owners?.GetValueOrDefault(schema))
             });
         }
 
@@ -137,6 +141,27 @@ public static class ScriptComposer
             }
 
             AddDefinitionBatches(group.Key, group, Add);
+        }
+
+        if(options.RestartSequences)
+        {
+            var sequences = snapshot.Objects
+                .Where(x => x.Type == DbObjectType.Sequence && x.Sequence is not null)
+                .OrderBy(x => x.Schema, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase);
+
+            foreach(var sequence in sequences)
+            {
+                var restart = SqlRender.BuildSequenceRestart(sequence.Sequence!);
+                if(restart is null)
+                    continue;
+
+                Add(PhaseId.Finalize, new ScriptBatch
+                {
+                    Describe = $"Restart sequence {sequence.Identifier}",
+                    Sql = restart
+                });
+            }
         }
 
         return Phases
@@ -188,6 +213,17 @@ public static class ScriptComposer
                 // (dynamic SQL, a deferred name resolution). Re-running it works.
                 Retryable = phase == PhaseId.Modules
             });
+
+            // The disabled state is not part of the trigger's text, and CREATE
+            // leaves a trigger enabled, so it has to be switched off afterwards.
+            if(schemaObject.Type == DbObjectType.Trigger && schemaObject.Trigger is { IsDisabled: true } disabledTrigger)
+            {
+                add(phase, new ScriptBatch
+                {
+                    Describe = $"Disable trigger {schemaObject.Identifier}",
+                    Sql = SqlRender.BuildTriggerDisable(schemaObject.Schema, schemaObject.Name, disabledTrigger)
+                });
+            }
         }
     }
 
