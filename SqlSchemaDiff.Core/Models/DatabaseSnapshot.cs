@@ -14,6 +14,16 @@ public sealed class DatabaseSnapshot
     public List<string> Schemas { get; init; } = new();
 
     /// <summary>
+    /// Owner (<c>sys.schemas.principal_id</c> resolved through
+    /// <c>sys.database_principals</c>) of each entry in <see cref="Schemas"/>.
+    /// Optional, and separate from <see cref="Schemas"/> on purpose: the list is
+    /// what the script has to create, this only refines how. Null on snapshots
+    /// produced before v1.6 and on databases whose schemas are all owned by
+    /// <c>dbo</c>.
+    /// </summary>
+    public Dictionary<string, string>? SchemaOwners { get; init; }
+
+    /// <summary>
     /// User-defined alias types referenced by captured tables. Like schemas, these
     /// are prerequisites rather than diffable objects. Empty on pre-v1.3 snapshots.
     /// </summary>

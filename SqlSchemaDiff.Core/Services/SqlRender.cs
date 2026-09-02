@@ -1,4 +1,7 @@
+using System.Globalization;
+using System.Numerics;
 using System.Text;
+using System.Text.RegularExpressions;
 using SqlSchemaDiff.Models;
 
 namespace SqlSchemaDiff.Services;
@@ -32,9 +35,26 @@ public static class SqlRender
     /// statement in its batch, so it is wrapped in <c>EXEC</c> to stay inside the
     /// <c>IF</c>.
     /// </summary>
-    public static string BuildSchemaCreate(string schema) =>
-        $"IF SCHEMA_ID(N'{Literal(schema)}') IS NULL{Environment.NewLine}" +
-        $"    EXEC(N'CREATE SCHEMA {Quote(schema).Replace("'", "''")}');";
+    public static string BuildSchemaCreate(string schema) => BuildSchemaCreate(schema, null);
+
+    /// <summary>
+    /// A guarded <c>CREATE SCHEMA</c> that names the owner when one is known.
+    /// <para>
+    /// <c>AUTHORIZATION</c> is omitted for <c>dbo</c>: that is the default owner, and
+    /// naming a principal the target database may not have turns a harmless preamble
+    /// into a hard failure.
+    /// </para>
+    /// </summary>
+    public static string BuildSchemaCreate(string schema, string? owner)
+    {
+        var authorization = string.IsNullOrWhiteSpace(owner) || string.Equals(owner, "dbo", StringComparison.OrdinalIgnoreCase)
+            ? string.Empty
+            : $" AUTHORIZATION {Quote(owner)}";
+
+        return
+            $"IF SCHEMA_ID(N'{Literal(schema)}') IS NULL{Environment.NewLine}" +
+            $"    EXEC(N'{Literal($"CREATE SCHEMA {Quote(schema)}{authorization}")}');";
+    }
 
     /// <summary>A guarded <c>CREATE TYPE</c> for a user-defined alias type.</summary>
     public static string BuildAliasTypeCreate(AliasTypeModel type)
@@ -285,5 +305,203 @@ public static class SqlRender
         }
 
         return sb.ToString().TrimEnd();
+    }
+
+    // ------------------------------------------------------------- table types
+
+    /// <summary>
+    /// Renders the complete <c>CREATE TYPE ... AS TABLE</c>.
+    /// <para>
+    /// Every constraint is inline. A table type has no ALTER: <c>ALTER TABLE</c>
+    /// cannot name one, so a key or check that is not in the CREATE can never be
+    /// added afterwards.
+    /// </para>
+    /// </summary>
+    public static string BuildTableTypeCreateScript(TableTypeModel tableType)
+    {
+        var lines = new List<string>();
+        lines.AddRange(tableType.Columns.Select(BuildColumnDefinition));
+        lines.AddRange(tableType.KeyConstraints.Select(BuildTableTypeKeyConstraint));
+        lines.AddRange(tableType.CheckConstraints.Select(BuildTableTypeCheckConstraint));
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"CREATE TYPE {Quote(tableType.Schema, tableType.Name)} AS TABLE");
+        sb.AppendLine("(");
+        for(var i = 0; i < lines.Count; i++)
+        {
+            sb.Append("    ");
+            sb.Append(lines[i]);
+            if(i != lines.Count - 1)
+                sb.Append(',');
+            sb.AppendLine();
+        }
+
+        sb.Append(')');
+        if(tableType.IsMemoryOptimized)
+            sb.Append(" WITH (MEMORY_OPTIMIZED = ON)");
+        sb.Append(';');
+        return sb.ToString();
+    }
+
+    public static string BuildTableTypeKeyConstraint(KeyConstraintModel keyConstraint)
+    {
+        var columnsSql = string.Join(", ", keyConstraint.Columns.Select(BuildIndexColumnExpression));
+        var constraintKind = keyConstraint.TypeCode == "PK" ? "PRIMARY KEY" : "UNIQUE";
+        var indexKind = IsClustered(keyConstraint.IndexTypeDesc) ? "CLUSTERED" : "NONCLUSTERED";
+        return $"{BuildInlineConstraintName(keyConstraint.Name, keyConstraint.IsSystemNamed)}{constraintKind} {indexKind} ({columnsSql})";
+    }
+
+    public static string BuildTableTypeCheckConstraint(CheckConstraintModel check) =>
+        $"{BuildInlineConstraintName(check.Name, check.IsSystemNamed)}CHECK {check.Definition}";
+
+    /// <summary>
+    /// <c>CONSTRAINT [name] </c> with a trailing space, or nothing. The table-type
+    /// variant of <see cref="BuildConstraintNameClause"/>: inline constraints lead
+    /// the line rather than following an <c>ADD</c>.
+    /// </summary>
+    private static string BuildInlineConstraintName(string? name, bool isSystemNamed) =>
+        isSystemNamed || string.IsNullOrWhiteSpace(name) ? string.Empty : $"CONSTRAINT {Quote(name)} ";
+
+    // --------------------------------------------------------------- sequences
+
+    /// <summary>The declared type of a sequence, e.g. <c>bigint</c> or <c>decimal(18,0)</c>.</summary>
+    public static string BuildSequenceTypeName(SequenceModel sequence) =>
+        BuildTypeName(sequence.TypeName, 0, sequence.Precision, sequence.Scale);
+
+    public static string BuildSequenceCreate(SequenceModel sequence)
+    {
+        var sb = new StringBuilder();
+        sb.Append($"CREATE SEQUENCE {Quote(sequence.Schema, sequence.Name)} AS {BuildSequenceTypeName(sequence)}");
+        sb.Append($" START WITH {Numeric(sequence.StartValue) ?? "1"}");
+        sb.Append($" INCREMENT BY {Numeric(sequence.Increment) ?? "1"}");
+        sb.Append(BuildSequenceBoundsClauses(sequence));
+        sb.Append(BuildSequenceCycleClause(sequence));
+        sb.Append(BuildSequenceCacheClause(sequence));
+        sb.Append(';');
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Resumes a restored sequence where the captured one left off:
+    /// <c>RESTART WITH current_value + increment</c>.
+    /// <para>
+    /// <c>sys.sequences.current_value</c> is the last value actually handed out, so
+    /// restarting <i>at</i> it would hand the same number out twice — a duplicate key
+    /// waiting to happen. Restarting one increment past it can at worst skip a single
+    /// value on a sequence that was never used (where <c>current_value</c> still
+    /// equals <c>start_value</c>), which costs nothing.
+    /// </para>
+    /// <para>
+    /// Returns null when the snapshot carries no current value; there is nothing to
+    /// resume from and <c>START WITH</c> already covers it.
+    /// </para>
+    /// </summary>
+    public static string? BuildSequenceRestart(SequenceModel sequence)
+    {
+        var current = ParseNumeric(sequence.CurrentValue);
+        if(current is null)
+            return null;
+
+        var next = current.Value + (ParseNumeric(sequence.Increment) ?? BigInteger.One);
+
+        // A RESTART outside the sequence's own bounds is rejected by the server.
+        var minimum = ParseNumeric(sequence.MinValue);
+        var maximum = ParseNumeric(sequence.MaxValue);
+        if(minimum is not null && next < minimum.Value)
+            next = minimum.Value;
+        if(maximum is not null && next > maximum.Value)
+            next = maximum.Value;
+
+        return $"ALTER SEQUENCE {Quote(sequence.Schema, sequence.Name)} RESTART WITH {next.ToString(CultureInfo.InvariantCulture)};";
+    }
+
+    /// <summary>
+    /// An <c>ALTER SEQUENCE</c> carrying only the clauses that differ, or null when
+    /// nothing alterable changed. The type and the start value are not alterable and
+    /// are not considered here.
+    /// </summary>
+    public static string? BuildSequenceAlter(SequenceModel source, SequenceModel target)
+    {
+        var clauses = new StringBuilder();
+
+        if(!NumericEquals(source.Increment, target.Increment))
+            clauses.Append($" INCREMENT BY {Numeric(source.Increment) ?? "1"}");
+
+        if(!NumericEquals(source.MinValue, target.MinValue))
+            clauses.Append(Numeric(source.MinValue) is { } minimum ? $" MINVALUE {minimum}" : " NO MINVALUE");
+
+        if(!NumericEquals(source.MaxValue, target.MaxValue))
+            clauses.Append(Numeric(source.MaxValue) is { } maximum ? $" MAXVALUE {maximum}" : " NO MAXVALUE");
+
+        if(source.IsCycling != target.IsCycling)
+            clauses.Append(BuildSequenceCycleClause(source));
+
+        if(source.IsCached != target.IsCached || source.CacheSize != target.CacheSize)
+            clauses.Append(BuildSequenceCacheClause(source));
+
+        return clauses.Length == 0
+            ? null
+            : $"ALTER SEQUENCE {Quote(source.Schema, source.Name)}{clauses};";
+    }
+
+    private static string BuildSequenceBoundsClauses(SequenceModel sequence)
+    {
+        var minimum = Numeric(sequence.MinValue) is { } min ? $" MINVALUE {min}" : " NO MINVALUE";
+        var maximum = Numeric(sequence.MaxValue) is { } max ? $" MAXVALUE {max}" : " NO MAXVALUE";
+        return minimum + maximum;
+    }
+
+    private static string BuildSequenceCycleClause(SequenceModel sequence) =>
+        sequence.IsCycling ? " CYCLE" : " NO CYCLE";
+
+    private static string BuildSequenceCacheClause(SequenceModel sequence)
+    {
+        if(!sequence.IsCached)
+            return " NO CACHE";
+
+        // is_cached with a null cache_size means "cache, size chosen by the server".
+        return sequence.CacheSize is > 0 ? $" CACHE {sequence.CacheSize.Value.ToString(CultureInfo.InvariantCulture)}" : " CACHE";
+    }
+
+    // ---------------------------------------------------------------- triggers
+
+    public static string BuildTriggerDisable(string schema, string name, TriggerModel trigger) =>
+        $"DISABLE TRIGGER {Quote(schema, name)} ON {Quote(trigger.ParentSchema, trigger.ParentName)};";
+
+    public static string BuildTriggerEnable(string schema, string name, TriggerModel trigger) =>
+        $"ENABLE TRIGGER {Quote(schema, name)} ON {Quote(trigger.ParentSchema, trigger.ParentName)};";
+
+    // ---------------------------------------------------- numeric-text helpers
+
+    private static readonly Regex IntegerLiteral = new(@"^[+-]?[0-9]+$", RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// The sequence bounds are carried as text and go straight into generated DDL,
+    /// so anything that is not an integer literal is treated as absent rather than
+    /// pasted into a statement.
+    /// </summary>
+    private static string? Numeric(string? value)
+    {
+        if(string.IsNullOrWhiteSpace(value))
+            return null;
+
+        var trimmed = value.Trim();
+        return IntegerLiteral.IsMatch(trimmed) ? trimmed : null;
+    }
+
+    private static BigInteger? ParseNumeric(string? value) =>
+        Numeric(value) is { } text && BigInteger.TryParse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : null;
+
+    /// <summary>Compares two numeric texts by value, so <c>+7</c> and <c>7</c> match.</summary>
+    internal static bool NumericEquals(string? left, string? right)
+    {
+        var leftValue = ParseNumeric(left);
+        var rightValue = ParseNumeric(right);
+        if(leftValue is not null && rightValue is not null)
+            return leftValue.Value == rightValue.Value;
+
+        return leftValue is null && rightValue is null;
     }
 }
