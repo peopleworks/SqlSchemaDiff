@@ -15,7 +15,8 @@ internal static class TestModels
         bool identity = false,
         string? collation = null,
         string? defaultName = null,
-        string? defaultDefinition = null)
+        string? defaultDefinition = null,
+        bool sparse = false)
         => new()
         {
             Name = name,
@@ -30,7 +31,8 @@ internal static class TestModels
             IdentityIncrement = identity ? "1" : null,
             CollationName = collation,
             DefaultName = defaultName,
-            DefaultDefinition = defaultDefinition
+            DefaultDefinition = defaultDefinition,
+            IsSparse = sparse
         };
 
     public static ColumnModel NVarchar(string name, short lengthChars, bool nullable = true, string collation = "SQL_Latin1_General_CP1_CI_AS")
@@ -60,6 +62,46 @@ internal static class TestModels
                 IndexColumnId = i + 1
             }).ToList()
         };
+
+    public static KeyConstraintModel Key(
+        string name, string typeCode = "PK", string indexTypeDesc = "CLUSTERED", params string[] columns)
+        => new()
+        {
+            Name = name,
+            TypeCode = typeCode,
+            IndexTypeDesc = indexTypeDesc,
+            Columns = IndexColumns(columns)
+        };
+
+    /// <summary>
+    /// A columnstore index as the extractor captures it: every column marked
+    /// "included", because a columnstore index has no key.
+    /// </summary>
+    public static IndexModel Columnstore(string name, bool clustered, params string[] columns)
+        => new()
+        {
+            Name = name,
+            TypeDesc = clustered ? "CLUSTERED COLUMNSTORE" : "NONCLUSTERED COLUMNSTORE",
+            // A columnstore index reports allow_row_locks and allow_page_locks as 0,
+            // which the renderer has to ignore rather than script as OFF.
+            AllowRowLocks = false,
+            AllowPageLocks = false,
+            Columns = columns.Select((c, i) => new IndexColumnModel
+            {
+                Name = c,
+                KeyOrdinal = 0,
+                IsIncluded = true,
+                IndexColumnId = i + 1
+            }).ToList()
+        };
+
+    public static List<IndexColumnModel> IndexColumns(params string[] names)
+        => names.Select((c, i) => new IndexColumnModel
+        {
+            Name = c,
+            KeyOrdinal = (byte)(i + 1),
+            IndexColumnId = i + 1
+        }).ToList();
 
     public static DbSchemaObject TableObject(TableModel table, string definition = "")
         => new()

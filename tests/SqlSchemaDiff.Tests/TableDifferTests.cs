@@ -141,4 +141,50 @@ public class TableDifferTests
         Assert.Contains("DROP CONSTRAINT [DF_Score_Old]", result.Script);
         Assert.Contains("DEFAULT ((5)) FOR [Score]", result.Script);
     }
+
+    [Fact]
+    public void ChangedSparseFlag_IsADifference()
+    {
+        var source = Table("Employee", Col("Bonus", "int", sparse: true));
+        var target = Table("Employee", Col("Bonus", "int"));
+
+        var result = _differ.Diff(source, target, includeDrops: false);
+
+        Assert.True(result.HasChanges);
+        Assert.Contains("ALTER COLUMN [Bonus] int SPARSE NULL;", result.Script);
+    }
+
+    [Fact]
+    public void ChangedIndexOptions_AreADifference()
+    {
+        var source = Table("Employee", NVarchar("Email", 256));
+        source.Indexes.Add(Index("UX_Email", unique: true, "Email"));
+        source.Indexes[0].FillFactor = 90;
+        var target = Table("Employee", NVarchar("Email", 256));
+        target.Indexes.Add(Index("UX_Email", unique: true, "Email"));
+
+        var result = _differ.Diff(source, target, includeDrops: false);
+
+        Assert.True(result.HasChanges);
+        Assert.Contains("ALTER INDEX [UX_Email] ON [dbo].[Employee] REBUILD WITH (FILLFACTOR = 90);", result.Script);
+    }
+
+    // The index sits on the column being rewritten, so it has to come down first and
+    // go back up afterwards - and it goes back up with the source's options.
+    [Fact]
+    public void RewrittenColumn_TakesItsIndexDownAndRestoresItWithTheNewOptions()
+    {
+        var source = Table("Employee", NVarchar("Email", 512));
+        source.Indexes.Add(Index("UX_Email", unique: true, "Email"));
+        source.Indexes[0].FillFactor = 90;
+        var target = Table("Employee", NVarchar("Email", 256));
+        target.Indexes.Add(Index("UX_Email", unique: true, "Email"));
+
+        var result = _differ.Diff(source, target, includeDrops: false);
+
+        Assert.Contains("DROP INDEX [UX_Email] ON [dbo].[Employee];", result.Script);
+        Assert.Contains("ALTER COLUMN [Email] nvarchar(512)", result.Script);
+        Assert.Contains("CREATE UNIQUE NONCLUSTERED INDEX [UX_Email] ON [dbo].[Employee] ([Email] ASC) WITH (FILLFACTOR = 90);", result.Script);
+        Assert.DoesNotContain("ALTER INDEX", result.Script);
+    }
 }

@@ -163,6 +163,12 @@ public static class SqlRender
         if(!string.IsNullOrWhiteSpace(column.CollationName) && !column.IsUserDefinedType)
             sb.Append($" COLLATE {column.CollationName}");
 
+        // SPARSE sits between COLLATE and IDENTITY, and a column definition that
+        // leaves it out clears it - so a rewriting ALTER COLUMN has to restate it,
+        // which is what TableDiffer does.
+        if(column.IsSparse)
+            sb.Append(" SPARSE");
+
         if(column.IsIdentity)
         {
             var seed = string.IsNullOrWhiteSpace(column.IdentitySeed) ? "1" : column.IdentitySeed;
@@ -219,7 +225,7 @@ public static class SqlRender
         var nameClause = BuildConstraintNameClause(keyConstraint.Name, keyConstraint.IsSystemNamed);
 
         return $"ALTER TABLE {TableIdentifier(table)} ADD{nameClause} " +
-               $"{constraintKind} {indexKind} ({columnsSql});";
+               $"{constraintKind} {indexKind} ({columnsSql}){BuildIndexOptionsClause(keyConstraint)};";
     }
 
     /// <summary>
@@ -228,6 +234,158 @@ public static class SqlRender
     /// </summary>
     public static bool IsClustered(string indexTypeDesc) =>
         string.Equals(indexTypeDesc?.Trim(), "CLUSTERED", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True for either kind of columnstore index (<c>sys.indexes.type</c> 5 or 6).</summary>
+    public static bool IsColumnstore(string? indexTypeDesc) =>
+        indexTypeDesc?.Contains("COLUMNSTORE", StringComparison.OrdinalIgnoreCase) == true;
+
+    /// <summary>True only for a clustered columnstore index, which owns the table's storage.</summary>
+    public static bool IsClusteredColumnstore(string? indexTypeDesc) =>
+        string.Equals(indexTypeDesc?.Trim(), "CLUSTERED COLUMNSTORE", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// True when nothing owns the table's row storage: no clustered PRIMARY KEY or
+    /// UNIQUE constraint, no clustered rowstore index and no clustered columnstore
+    /// index. Only a heap scripts its compression on the table itself; every other
+    /// table carries it on whichever index holds the rows.
+    /// </summary>
+    public static bool IsHeap(TableModel table) =>
+        !table.KeyConstraints.Any(x => IsClustered(x.IndexTypeDesc)) &&
+        !table.Indexes.Any(x => IsClustered(x.TypeDesc) || IsClusteredColumnstore(x.TypeDesc));
+
+    /// <summary>
+    /// True when a <c>data_compression_desc</c> is the implicit one for its index
+    /// kind and so does not need scripting: nothing captured, NONE for rowstore, or
+    /// COLUMNSTORE for a columnstore index, which is compressed by definition.
+    /// </summary>
+    public static bool IsDefaultCompression(string? dataCompression) =>
+        string.IsNullOrWhiteSpace(dataCompression) ||
+        dataCompression.Trim().Equals("NONE", StringComparison.OrdinalIgnoreCase) ||
+        dataCompression.Trim().Equals("COLUMNSTORE", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Compares two compression descriptors, treating every spelling of "the default"
+    /// as one value so a snapshot taken before compression was captured does not read
+    /// as drift against a freshly extracted uncompressed index.
+    /// </summary>
+    public static bool CompressionEqual(string? a, string? b) =>
+        (IsDefaultCompression(a) && IsDefaultCompression(b)) ||
+        string.Equals(a?.Trim(), b?.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    private static string OnOff(bool value) => value ? "ON" : "OFF";
+
+    /// <summary>
+    /// Renders an index's <c>WITH (...)</c> clause, listing only the options that are
+    /// not already what SQL Server would do on its own. An index created with the
+    /// defaults therefore scripts with no clause at all, and reads back identical.
+    /// </summary>
+    /// <param name="isColumnstore">
+    /// A columnstore index has no B-tree pages to fill or lock, and SQL Server
+    /// rejects FILLFACTOR, PAD_INDEX, IGNORE_DUP_KEY, ALLOW_ROW_LOCKS and
+    /// ALLOW_PAGE_LOCKS on one outright; only DATA_COMPRESSION survives.
+    /// </param>
+    public static string BuildIndexOptionsClause(IIndexStorageOptions options, bool isColumnstore = false)
+    {
+        var parts = new List<string>();
+
+        if(!isColumnstore)
+        {
+            if(options.FillFactor > 0)
+                parts.Add($"FILLFACTOR = {options.FillFactor}");
+            if(options.IsPadded)
+                parts.Add("PAD_INDEX = ON");
+            if(options.IgnoreDupKey)
+                parts.Add("IGNORE_DUP_KEY = ON");
+            if(!options.AllowRowLocks)
+                parts.Add("ALLOW_ROW_LOCKS = OFF");
+            if(!options.AllowPageLocks)
+                parts.Add("ALLOW_PAGE_LOCKS = OFF");
+        }
+
+        if(!IsDefaultCompression(options.DataCompression))
+            parts.Add($"DATA_COMPRESSION = {options.DataCompression!.Trim().ToUpperInvariant()}");
+
+        return parts.Count == 0 ? string.Empty : $" WITH ({string.Join(", ", parts)})";
+    }
+
+    /// <summary>
+    /// Renders the CREATE TABLE <c>WITH (...)</c> clause. Compression only appears
+    /// here for a heap; on any other table the rows belong to an index and
+    /// <see cref="BuildIndexOptionsClause"/> writes the setting there.
+    /// </summary>
+    public static string BuildTableOptionsClause(TableModel table)
+    {
+        var parts = new List<string>();
+
+        if(IsHeap(table) && !IsDefaultCompression(table.DataCompression))
+            parts.Add($"DATA_COMPRESSION = {table.DataCompression!.Trim().ToUpperInvariant()}");
+
+        return parts.Count == 0 ? string.Empty : $" WITH ({string.Join(", ", parts)})";
+    }
+
+    /// <summary>
+    /// The statements that move an existing index from <paramref name="target"/>'s
+    /// storage options to <paramref name="source"/>'s without dropping it, or an
+    /// empty list when the two already agree. Dropping and re-creating an index costs
+    /// a full sort of the key; a rebuild costs only the rebuild, and the lock options
+    /// are pure metadata and cost nothing at all, so they go through SET. The caller
+    /// is responsible for having checked that the index's shape (its columns,
+    /// uniqueness, kind and filter) is unchanged.
+    /// </summary>
+    public static List<string> BuildIndexOptionsAlter(
+        TableModel table, string indexName,
+        IIndexStorageOptions source, IIndexStorageOptions target, bool isColumnstore)
+    {
+        var statements = new List<string>();
+        var alterIndex = $"ALTER INDEX {Quote(indexName)} ON {TableIdentifier(table)}";
+
+        var settable = new List<string>();
+        var rebuildable = new List<string>();
+
+        if(!isColumnstore)
+        {
+            if(source.AllowRowLocks != target.AllowRowLocks)
+                settable.Add($"ALLOW_ROW_LOCKS = {OnOff(source.AllowRowLocks)}");
+            if(source.AllowPageLocks != target.AllowPageLocks)
+                settable.Add($"ALLOW_PAGE_LOCKS = {OnOff(source.AllowPageLocks)}");
+            if(source.IgnoreDupKey != target.IgnoreDupKey)
+                settable.Add($"IGNORE_DUP_KEY = {OnOff(source.IgnoreDupKey)}");
+
+            // FILLFACTOR 0 is how sys.indexes reports "never set". On the way back in
+            // it has to be written as 100, which means the same thing and is the only
+            // value SQL Server accepts for a completely full page.
+            if(source.FillFactor != target.FillFactor)
+                rebuildable.Add($"FILLFACTOR = {(source.FillFactor == 0 ? 100 : source.FillFactor)}");
+            if(source.IsPadded != target.IsPadded)
+                rebuildable.Add($"PAD_INDEX = {OnOff(source.IsPadded)}");
+        }
+
+        if(!CompressionEqual(source.DataCompression, target.DataCompression))
+            rebuildable.Add($"DATA_COMPRESSION = {ScriptedCompression(source.DataCompression, isColumnstore)}");
+
+        if(settable.Count > 0)
+            statements.Add($"{alterIndex} SET ({string.Join(", ", settable)});");
+        if(rebuildable.Count > 0)
+            statements.Add($"{alterIndex} REBUILD WITH ({string.Join(", ", rebuildable)});");
+
+        return statements;
+    }
+
+    /// <summary>
+    /// <c>ALTER TABLE ... REBUILD</c>, which is the only way to change a heap's
+    /// compression: it has no index to rebuild.
+    /// </summary>
+    public static string BuildTableRebuild(TableModel table, string? dataCompression) =>
+        $"ALTER TABLE {TableIdentifier(table)} REBUILD WITH (DATA_COMPRESSION = {ScriptedCompression(dataCompression, false)});";
+
+    /// <summary>
+    /// Spells out a compression setting for a statement that has to name one, turning
+    /// "not captured" back into the explicit default for the index kind.
+    /// </summary>
+    private static string ScriptedCompression(string? dataCompression, bool isColumnstore) =>
+        IsDefaultCompression(dataCompression)
+            ? (isColumnstore ? "COLUMNSTORE" : "NONE")
+            : dataCompression!.Trim().ToUpperInvariant();
 
     public static string BuildForeignKeyAdd(TableModel table, ForeignKeyModel foreignKey)
     {
@@ -263,6 +421,9 @@ public static class SqlRender
 
     public static string BuildIndexCreate(TableModel table, IndexModel index)
     {
+        if(IsColumnstore(index.TypeDesc))
+            return BuildColumnstoreIndexCreate(table, index);
+
         var keyColumns = index.Columns.Where(x => !x.IsIncluded).Select(BuildIndexColumnExpression).ToList();
         var includedColumns = index.Columns.Where(x => x.IsIncluded).Select(x => Quote(x.Name)).ToList();
 
@@ -273,6 +434,33 @@ public static class SqlRender
             sb.Append($" INCLUDE ({string.Join(", ", includedColumns)})");
         if(!string.IsNullOrWhiteSpace(index.FilterDefinition))
             sb.Append($" WHERE {index.FilterDefinition}");
+        sb.Append(BuildIndexOptionsClause(index));
+        sb.Append(';');
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// A columnstore index keeps no sort order, so its columns are listed bare
+    /// (SQL Server rejects ASC and DESC on one) and there is no UNIQUE or INCLUDE.
+    /// A clustered columnstore index covers every column in the table implicitly and
+    /// so takes no column list at all.
+    /// </summary>
+    private static string BuildColumnstoreIndexCreate(TableModel table, IndexModel index)
+    {
+        var sb = new StringBuilder();
+        sb.Append($"CREATE {index.TypeDesc.Replace('_', ' ')} INDEX {Quote(index.Name)} ON {TableIdentifier(table)}");
+
+        if(!IsClusteredColumnstore(index.TypeDesc))
+        {
+            // sys.index_columns marks every columnstore column as "included" because
+            // none of them is a key. They are all part of the column list all the same.
+            var columns = index.Columns.Select(x => Quote(x.Name));
+            sb.Append($" ({string.Join(", ", columns)})");
+            if(!string.IsNullOrWhiteSpace(index.FilterDefinition))
+                sb.Append($" WHERE {index.FilterDefinition}");
+        }
+
+        sb.Append(BuildIndexOptionsClause(index, isColumnstore: true));
         sb.Append(';');
         return sb.ToString();
     }
@@ -315,7 +503,7 @@ public static class SqlRender
                 sb.Append(',');
             sb.AppendLine();
         }
-        sb.Append(");");
+        sb.Append($"){BuildTableOptionsClause(table)};");
         return sb.ToString();
     }
 
