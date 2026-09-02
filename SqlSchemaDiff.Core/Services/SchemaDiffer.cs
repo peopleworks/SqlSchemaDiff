@@ -34,7 +34,7 @@ public sealed class SchemaDiffer
         {
             if(!targetByKey.TryGetValue(sourceObject.Key, out var targetObject))
             {
-                deferredCreates.Add(new PendingCreate(sourceObject, EnsureTrailingGo(sourceObject.Definition)));
+                deferredCreates.Add(new PendingCreate(sourceObject, BuildCreateScript(sourceObject, sourceObject.Definition)));
                 emittedObjects.Add(sourceObject);
                 added++;
                 addedObjects.Add(sourceObject.Identifier);
@@ -87,7 +87,7 @@ public sealed class SchemaDiffer
                 if(allowTableRebuild)
                 {
                     dropStatements.Add(BuildDropStatement(sourceObject, includeIfExists: true));
-                    deferredCreates.Add(new PendingCreate(sourceObject, EnsureTrailingGo(sourceObject.Definition)));
+                    deferredCreates.Add(new PendingCreate(sourceObject, BuildCreateScript(sourceObject, sourceObject.Definition)));
                     emittedObjects.Add(sourceObject);
                 }
                 else
@@ -102,7 +102,7 @@ public sealed class SchemaDiffer
                 continue;
             }
 
-            deferredCreates.Add(new PendingCreate(sourceObject, EnsureTrailingGo(ToCreateOrAlter(sourceObject))));
+            deferredCreates.Add(new PendingCreate(sourceObject, BuildCreateScript(sourceObject, ToCreateOrAlter(sourceObject))));
             emittedObjects.Add(sourceObject);
         }
 
@@ -258,92 +258,33 @@ public sealed class SchemaDiffer
         if(pendingCreates.Count == 0)
             return new List<string>();
 
-        var nodes = pendingCreates
-            .GroupBy(x => x.Object.Key, StringComparer.OrdinalIgnoreCase)
-            .Select(x => x.First())
-            .ToDictionary(x => x.Object.Key, StringComparer.OrdinalIgnoreCase);
+        var order = DependencyOrder.Sort(
+            pendingCreates,
+            x => x.Object.Key,
+            x => x.Object.Dependencies,
+            GetCreateOrder);
 
-        var adjacency = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-        var inDegree = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-
-        foreach(var key in nodes.Keys)
-        {
-            adjacency[key] = new List<string>();
-            inDegree[key] = 0;
-        }
-
-        foreach(var node in nodes.Values)
-        {
-            foreach(var dependency in node.Object.Dependencies.Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                if(!nodes.ContainsKey(dependency))
-                    continue;
-
-                if(string.Equals(dependency, node.Object.Key, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                adjacency[dependency].Add(node.Object.Key);
-                inDegree[node.Object.Key]++;
-            }
-        }
-
-        var ready = nodes.Values
-            .Where(x => inDegree[x.Object.Key] == 0)
-            .OrderBy(GetCreateOrder)
-            .ThenBy(x => x.Object.Key, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        var ordered = new List<PendingCreate>();
-        while(ready.Count > 0)
-        {
-            var next = ready[0];
-            ready.RemoveAt(0);
-            ordered.Add(next);
-
-            foreach(var adjacentKey in adjacency[next.Object.Key])
-            {
-                inDegree[adjacentKey]--;
-                if(inDegree[adjacentKey] != 0)
-                    continue;
-
-                var adjacentNode = nodes[adjacentKey];
-                InsertInOrder(ready, adjacentNode);
-            }
-        }
-
-        var result = ordered.Select(x => x.Script).ToList();
-        if(ordered.Count == nodes.Count)
+        var placedCount = order.Ordered.Count - order.CycleMembers.Count;
+        var result = order.Ordered.Take(placedCount).Select(x => x.Script).ToList();
+        if(!order.HasCycle)
             return result;
 
         result.Add("-- WARNING: dependency cycle detected. Remaining objects were appended in fallback order.");
         result.Add(string.Empty);
-
-        var remaining = nodes.Values
-            .Where(x => !ordered.Any(y => string.Equals(y.Object.Key, x.Object.Key, StringComparison.OrdinalIgnoreCase)))
-            .OrderBy(GetCreateOrder)
-            .ThenBy(x => x.Object.Key, StringComparer.OrdinalIgnoreCase);
-
-        result.AddRange(remaining.Select(x => x.Script));
+        result.AddRange(order.CycleMembers.Select(x => x.Script));
         return result;
     }
 
-    private static void InsertInOrder(List<PendingCreate> ready, PendingCreate candidate)
-    {
-        var index = ready.FindIndex(x => CompareCreateNodes(candidate, x) < 0);
-        if(index < 0)
-            ready.Add(candidate);
-        else
-            ready.Insert(index, candidate);
-    }
-
-    private static int CompareCreateNodes(PendingCreate left, PendingCreate right)
-    {
-        var byType = GetCreateOrder(left).CompareTo(GetCreateOrder(right));
-        if(byType != 0)
-            return byType;
-
-        return string.Compare(left.Object.Key, right.Object.Key, StringComparison.OrdinalIgnoreCase);
-    }
+    /// <summary>
+    /// The text to run for one object, wrapped in the <c>SET</c> options the module
+    /// was created with when those are not the script defaults, and closed by its
+    /// own <c>GO</c>.
+    /// </summary>
+    private static string BuildCreateScript(DbSchemaObject schemaObject, string sql) =>
+        EnsureTrailingGo(SqlRender.WrapWithModuleSessionOptions(
+            sql,
+            schemaObject.UsesAnsiNulls,
+            schemaObject.UsesQuotedIdentifier));
 
     private static string EnsureTrailingGo(string sql)
     {

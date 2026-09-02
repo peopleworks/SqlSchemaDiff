@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using SqlSchemaDiff.Models;
 
 namespace SqlSchemaDiff.Services;
@@ -17,6 +18,59 @@ public static class SqlRender
     /// inherit them, and QUOTED_IDENTIFIER OFF makes those objects fail to create.
     /// </summary>
     public const string SessionOptionsPreamble = "SET ANSI_NULLS ON;\r\nSET QUOTED_IDENTIFIER ON;";
+
+    /// <summary>
+    /// Guarantees the text ends on its own <c>GO</c>, so it executes as an isolated
+    /// batch. Critical for CREATE VIEW/PROCEDURE/FUNCTION: SQL Server stores the
+    /// whole batch as the object definition.
+    /// </summary>
+    public static string EnsureTrailingGo(string sql)
+    {
+        var trimmed = sql.TrimEnd();
+        if(Regex.IsMatch(trimmed, @"(^|\r?\n)\s*GO\s*$", RegexOptions.IgnoreCase))
+            return trimmed;
+
+        return $"{trimmed}{Environment.NewLine}GO";
+    }
+
+    /// <summary>
+    /// Wraps a module in the <c>SET</c> options it was created with, when they are
+    /// not the defaults the script already establishes.
+    /// <para>
+    /// SQL Server records <c>ANSI_NULLS</c> and <c>QUOTED_IDENTIFIER</c> per module
+    /// and re-applies them whenever the module runs, so a module created with one
+    /// of them OFF behaves differently from the same text created with it ON. The
+    /// options take effect when the *next* batch is parsed, which is why the
+    /// wrapper is <c>GO</c>-separated rather than part of the module's own batch.
+    /// The flags are re-set to ON afterwards so the rest of the script keeps the
+    /// preamble's defaults.
+    /// </para>
+    /// <para>
+    /// A null flag means "unknown" (a snapshot taken before these were captured)
+    /// and is treated as ON, so the text is returned unchanged.
+    /// </para>
+    /// </summary>
+    public static string WrapWithModuleSessionOptions(string moduleSql, bool? usesAnsiNulls, bool? usesQuotedIdentifier)
+    {
+        var ansiNullsOff = usesAnsiNulls == false;
+        var quotedIdentifierOff = usesQuotedIdentifier == false;
+        if(!ansiNullsOff && !quotedIdentifierOff)
+            return moduleSql;
+
+        var sb = new StringBuilder();
+        if(ansiNullsOff)
+            sb.AppendLine("SET ANSI_NULLS OFF;");
+        if(quotedIdentifierOff)
+            sb.AppendLine("SET QUOTED_IDENTIFIER OFF;");
+        sb.AppendLine("GO");
+        sb.AppendLine(EnsureTrailingGo(moduleSql));
+        if(ansiNullsOff)
+            sb.AppendLine("SET ANSI_NULLS ON;");
+        if(quotedIdentifierOff)
+            sb.AppendLine("SET QUOTED_IDENTIFIER ON;");
+        sb.Append("GO");
+        return sb.ToString();
+    }
 
     public static string Quote(string name) => $"[{name.Replace("]", "]]")}]";
 
@@ -215,12 +269,23 @@ public static class SqlRender
     public static string BuildConstraintDrop(TableModel table, string name) =>
         $"ALTER TABLE {TableIdentifier(table)} DROP CONSTRAINT {Quote(name)};";
 
-    /// <summary>Renders the complete CREATE TABLE script (table + keys + FKs + checks + indexes).</summary>
-    public static string BuildTableCreateScript(TableModel table)
+    /// <summary>Stops validating a constraint without dropping it.</summary>
+    public static string BuildConstraintNoCheck(TableModel table, string name) =>
+        $"ALTER TABLE {TableIdentifier(table)} NOCHECK CONSTRAINT {Quote(name)};";
+
+    public static string BuildIndexDisable(TableModel table, IndexModel index) =>
+        $"ALTER INDEX {Quote(index.Name)} ON {TableIdentifier(table)} DISABLE;";
+
+    /// <summary>
+    /// Renders only the <c>CREATE TABLE</c> statement: columns, computed columns,
+    /// identity and inline defaults. Everything that can be attached later (keys,
+    /// checks, indexes, foreign keys) is left to the callers that place those in
+    /// their own phase.
+    /// </summary>
+    public static string BuildTableCreateOnly(TableModel table)
     {
-        var tableIdentifier = TableIdentifier(table);
         var sb = new StringBuilder();
-        sb.AppendLine($"CREATE TABLE {tableIdentifier}");
+        sb.AppendLine($"CREATE TABLE {TableIdentifier(table)}");
         sb.AppendLine("(");
         for(var i = 0; i < table.Columns.Count; i++)
         {
@@ -231,7 +296,15 @@ public static class SqlRender
                 sb.Append(',');
             sb.AppendLine();
         }
-        sb.AppendLine(");");
+        sb.Append(");");
+        return sb.ToString();
+    }
+
+    /// <summary>Renders the complete CREATE TABLE script (table + keys + FKs + checks + indexes).</summary>
+    public static string BuildTableCreateScript(TableModel table)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine(BuildTableCreateOnly(table));
         sb.AppendLine("GO");
         sb.AppendLine();
 
@@ -249,7 +322,7 @@ public static class SqlRender
 
             if(foreignKey.IsDisabled && !foreignKey.IsSystemNamed)
             {
-                sb.AppendLine($"ALTER TABLE {tableIdentifier} NOCHECK CONSTRAINT {Quote(foreignKey.Name)};");
+                sb.AppendLine(BuildConstraintNoCheck(table, foreignKey.Name));
                 sb.AppendLine("GO");
             }
 
@@ -263,7 +336,7 @@ public static class SqlRender
 
             if(check.IsDisabled && !check.IsSystemNamed)
             {
-                sb.AppendLine($"ALTER TABLE {tableIdentifier} NOCHECK CONSTRAINT {Quote(check.Name)};");
+                sb.AppendLine(BuildConstraintNoCheck(table, check.Name));
                 sb.AppendLine("GO");
             }
 
@@ -277,7 +350,7 @@ public static class SqlRender
 
             if(index.IsDisabled)
             {
-                sb.AppendLine($"ALTER INDEX {Quote(index.Name)} ON {tableIdentifier} DISABLE;");
+                sb.AppendLine(BuildIndexDisable(table, index));
                 sb.AppendLine("GO");
             }
 

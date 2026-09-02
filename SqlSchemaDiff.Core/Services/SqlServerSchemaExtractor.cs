@@ -536,7 +536,9 @@ public sealed class SqlServerSchemaExtractor
                                o.type,
                                s.name AS schema_name,
                                o.name,
-                               m.definition
+                               m.definition,
+                               m.uses_ansi_nulls,
+                               m.uses_quoted_identifier
                            FROM sys.objects o
                            INNER JOIN sys.schemas s ON s.schema_id = o.schema_id
                            INNER JOIN sys.sql_modules m ON m.object_id = o.object_id
@@ -579,7 +581,12 @@ public sealed class SqlServerSchemaExtractor
                 Schema = schema,
                 Name = name,
                 Definition = definition,
-                Dependencies = dependencies
+                Dependencies = dependencies,
+
+                // SQL Server re-applies these when the module runs, so a module
+                // created with one of them OFF has to be recreated the same way.
+                UsesAnsiNulls = reader.IsDBNull(5) ? null : reader.GetBoolean(5),
+                UsesQuotedIdentifier = reader.IsDBNull(6) ? null : reader.GetBoolean(6)
             });
         }
 
