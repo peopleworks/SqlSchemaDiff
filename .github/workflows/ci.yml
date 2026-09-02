@@ -32,6 +32,12 @@ jobs:
       - name: Test
         run: dotnet test tests/SqlSchemaDiff.Tests/SqlSchemaDiff.Tests.csproj -c Release
 
+      # No SQLDIFF_TEST_CONN here on purpose. The live tests have to compile and
+      # report themselves as skipped on a machine with no SQL Server, otherwise
+      # every contributor without a database sees a red build.
+      - name: Test (live tests, skip path)
+        run: dotnet test tests/SqlSchemaDiff.IntegrationTests/SqlSchemaDiff.IntegrationTests.csproj -c Release
+
       - name: Pack (verify the tool package builds)
         run: dotnet pack SqlSchemaDiff.csproj -c Release -o ./artifacts
 
@@ -125,6 +131,23 @@ jobs:
           $SQLDIFF drift \
             --source-conn "$BASE;Database=SqlDiffSrc" \
             --target-conn "$BASE;Database=SqlDiffDst"
+
+      # The step above drives the CLI; this one drives the library directly and
+      # asserts on the snapshot, which is where the extractor's per-property
+      # coverage lives. The tests create and drop their own SqlDiffIT_* databases,
+      # so the connection string is server-level.
+      - name: Live tests against the service container
+        env:
+          SQLDIFF_TEST_CONN: Server=localhost,1433;User Id=sa;Password=Str0ng!Passw0rd#CI;Encrypt=True;TrustServerCertificate=True
+        run: dotnet test tests/SqlSchemaDiff.IntegrationTests/SqlSchemaDiff.IntegrationTests.csproj -c Release --logger "trx;LogFileName=integration.trx"
+
+      - name: Upload the live test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: '**/TestResults/integration.trx'
+          if-no-files-found: ignore
 
   docs:
     name: pocket guide assets
