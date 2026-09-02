@@ -56,6 +56,19 @@ public sealed class TableModel
     /// such a table with a notice rather than scripting it wrongly.
     /// </summary>
     public string? Durability { get; set; }
+
+    /// <summary>
+    /// A shallow copy. <see cref="Services.TableRebuilder"/> needs this table under a
+    /// different name and with a different column list, and everything else about it
+    /// has to follow automatically — including properties added after this was
+    /// written, which is what <c>MemberwiseClone</c> guarantees and a hand-written
+    /// copy constructor does not.
+    /// </summary>
+    /// <remarks>
+    /// The lists are shared with the original. A caller that needs to change one
+    /// replaces the whole list; mutating it would reach back into the snapshot.
+    /// </remarks>
+    public TableModel Clone() => (TableModel)MemberwiseClone();
 }
 
 public sealed class ColumnModel
@@ -87,6 +100,14 @@ public sealed class ColumnModel
     /// was captured, which is also the value for every ordinary column.
     /// </summary>
     public bool IsSparse { get; set; }
+
+    /// <summary>
+    /// A copy. Used where a column has to be rendered with one property changed —
+    /// the rebuild renames a default constraint so the temporary table can carry it
+    /// without colliding with the original's — without touching the snapshot the
+    /// column came from. See <see cref="TableModel.Clone"/>.
+    /// </summary>
+    public ColumnModel Clone() => (ColumnModel)MemberwiseClone();
 }
 
 public sealed class KeyConstraintModel : IIndexStorageOptions

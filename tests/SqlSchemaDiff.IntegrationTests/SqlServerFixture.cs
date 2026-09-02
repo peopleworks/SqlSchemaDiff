@@ -33,6 +33,8 @@ public sealed class SqlServerFixture : IAsyncLifetime, IDisposable
     private static readonly Lazy<string> FullSchema = new(() => ReadScript("full.sql"));
     private static readonly Lazy<string> AlterSchema = new(() => ReadScript("alter.sql"));
     private static readonly Lazy<string> UnsupportedSchema = new(() => ReadScript("unsupported.sql"));
+    private static readonly Lazy<string> RebuildBeforeSchema = new(() => ReadScript("rebuild-before.sql"));
+    private static readonly Lazy<string> RebuildAfterSchema = new(() => ReadScript("rebuild-after.sql"));
 
     private readonly ConcurrentQueue<string> _databases = new();
     private bool _cleanedUp;
@@ -48,6 +50,12 @@ public sealed class SqlServerFixture : IAsyncLifetime, IDisposable
 
     /// <summary>Objects the extractor reports as notices instead of modelling.</summary>
     public static string UnsupportedSchemaScript => UnsupportedSchema.Value;
+
+    /// <summary>A populated table in the shape a rebuild starts from.</summary>
+    public static string RebuildBeforeScript => RebuildBeforeSchema.Value;
+
+    /// <summary>The same schema with the identity change only a rebuild can make.</summary>
+    public static string RebuildAfterScript => RebuildAfterSchema.Value;
 
     private static string? RawConnectionString => Environment.GetEnvironmentVariable(ConnectionEnvironmentVariable);
 

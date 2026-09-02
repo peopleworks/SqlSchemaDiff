@@ -41,10 +41,10 @@ public sealed class RoundTripTests
         // full of drops the other means the target picked up something extra.
         Snapshots.AssertNoChanges("target -> source", Compare(target, source));
 
-        // Convergence alone is not proof for the enabled/disabled flags: the differ
-        // does not compare is_disabled on foreign keys, checks or indexes, nor
-        // is_not_trusted on foreign keys, so a target that silently re-enabled them
-        // would still diff clean. Read the deployed state instead of trusting it.
+        // Since 1.6 the differ does compare is_disabled and is_not_trusted, so drift
+        // in them would show up above — but a renderer that never emitted the NOCHECK
+        // in the first place would make both sides agree on "enabled" and still
+        // converge. Read the deployed state rather than trusting the comparison.
         var deployedAudit = target.Table("ops", "AuditEntry");
         Assert.True(deployedAudit.ForeignKey("FK_AuditEntry_Invoice").IsNotTrusted,
             "the WITH NOCHECK foreign key came back trusted on the target");
@@ -130,6 +130,12 @@ public sealed class RoundTripTests
         Assert.False(customer.Column("Rating").IsNullable);
         Assert.Equal(80, target.Table("ops", "AuditEntry").Column("Source").MaxLength);
         target.Table("ops", "AuditEntry").Index("IX_AuditEntry_Source");
+
+        // [Source] is named by CK_AuditEntry_Source, and SQL Server will not widen a
+        // column a check constraint mentions (error 5074). The ALTER above only got
+        // through because the differ read the check's expression, took it down first
+        // and put it back — and it is back.
+        Assert.NotNull(target.Table("ops", "AuditEntry").FindCheck("CK_AuditEntry_Source"));
         target.Table("sales", "Invoice").Index("IX_Invoice_Sku");
         target.Table("sales", "Payment").ForeignKey("FK_Payment_Invoice");
         Assert.Contains("CustomerId", target.Object(DbObjectType.View, "sales", "vInvoiceComputed").Definition);
