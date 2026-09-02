@@ -67,11 +67,75 @@ public sealed class SchemaDiffer
                 continue;
             }
 
+            // Sequences: compared through the structured model so that the captured
+            // current value — which moves with every use and is not drift — stays out
+            // of the comparison. ALTER where SQL Server allows it, recreate where not.
+            if(sourceObject.Type == DbObjectType.Sequence
+                && sourceObject.Sequence is not null
+                && targetObject.Sequence is not null)
+            {
+                var sequenceDiff = SequenceDiffer.Diff(sourceObject.Sequence, targetObject.Sequence);
+                if(!sequenceDiff.HasChanges)
+                    continue;
+
+                changed++;
+                changedObjects.Add(sourceObject.Identifier);
+                if(addOnly)
+                {
+                    skipped++;
+                    continue;
+                }
+
+                createInfoStatements.AddRange(sequenceDiff.Warnings);
+                if(sequenceDiff.RequiresRecreate)
+                {
+                    dropStatements.Add(BuildDropStatement(sourceObject, includeIfExists: true));
+                    deferredCreates.Add(new PendingCreate(sourceObject, EnsureTrailingGo(sourceObject.Definition)));
+                }
+                else
+                {
+                    alterStatements.Add(sequenceDiff.Script!);
+                }
+
+                emittedObjects.Add(sourceObject);
+                continue;
+            }
+
+            // Table types have no ALTER of any kind, so any difference at all means
+            // DROP TYPE + CREATE TYPE — and that fails while a module still uses it.
+            if(sourceObject.Type == DbObjectType.TableType
+                && sourceObject.TableType is not null
+                && targetObject.TableType is not null)
+            {
+                if(TableTypesEqual(sourceObject.TableType, targetObject.TableType))
+                    continue;
+
+                changed++;
+                changedObjects.Add(sourceObject.Identifier);
+                if(addOnly)
+                {
+                    skipped++;
+                    continue;
+                }
+
+                createInfoStatements.AddRange(BuildTableTypeRecreateWarnings(source, sourceObject));
+                dropStatements.Add(BuildDropStatement(sourceObject, includeIfExists: true));
+                deferredCreates.Add(new PendingCreate(sourceObject, EnsureTrailingGo(sourceObject.Definition)));
+                emittedObjects.Add(sourceObject);
+                continue;
+            }
+
             // Programmable objects, table rebuilds, and legacy tables without a structured
             // model fall back to normalized-text comparison.
             var sourceNormalized = SchemaTextNormalizer.Normalize(sourceObject.Definition);
             var targetNormalized = SchemaTextNormalizer.Normalize(targetObject.Definition);
-            if(string.Equals(sourceNormalized, targetNormalized, StringComparison.Ordinal))
+            var definitionsMatch = string.Equals(sourceNormalized, targetNormalized, StringComparison.Ordinal);
+
+            // A trigger's enabled state lives outside its module text, so identical
+            // definitions are not enough to call it unchanged.
+            var triggerStateChange = BuildTriggerStateChange(sourceObject, targetObject);
+
+            if(definitionsMatch && triggerStateChange is null)
                 continue;
 
             changed++;
@@ -79,6 +143,14 @@ public sealed class SchemaDiffer
             if(addOnly)
             {
                 skipped++;
+                continue;
+            }
+
+            if(definitionsMatch)
+            {
+                // Only the enabled state moved: DISABLE/ENABLE, no need to re-run the module.
+                alterStatements.Add(triggerStateChange!);
+                emittedObjects.Add(sourceObject);
                 continue;
             }
 
@@ -135,6 +207,7 @@ public sealed class SchemaDiffer
         }
 
         var createStatements = new List<string>();
+        createStatements.AddRange(BuildSchemaOwnerWarnings(source, target));
         createStatements.AddRange(createInfoStatements);
         createStatements.AddRange(OrderCreateStatementsByDependencies(deferredCreates));
         createStatements.AddRange(alterStatements);
@@ -165,11 +238,11 @@ public sealed class SchemaDiffer
         if(emitted.Count == 0)
             return new List<string>();
 
+        // A table type's columns can be alias-typed too, so both kinds are searched.
         var usedTypes = source.Types
-            .Where(type => emitted.Any(o => o.Table is not null && o.Table.Columns.Any(column =>
-                column.IsUserDefinedType &&
+            .Where(type => emitted.SelectMany(SqlServerSchemaExtractor.AliasTypedColumns).Any(column =>
                 string.Equals(column.TypeSchema, type.Schema, StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(column.TypeName, type.Name, StringComparison.OrdinalIgnoreCase))))
+                string.Equals(column.TypeName, type.Name, StringComparison.OrdinalIgnoreCase)))
             .OrderBy(x => x.Schema, StringComparer.OrdinalIgnoreCase)
             .ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -180,10 +253,60 @@ public sealed class SchemaDiffer
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(x => x, StringComparer.OrdinalIgnoreCase);
 
+        var owners = ToCaseInsensitive(source.SchemaOwners);
         var statements = new List<string>();
-        statements.AddRange(schemas.Select(SqlRender.BuildSchemaCreate));
+        statements.AddRange(schemas.Select(schema =>
+            SqlRender.BuildSchemaCreate(schema, owners.GetValueOrDefault(schema))));
         statements.AddRange(usedTypes.Select(SqlRender.BuildAliasTypeCreate));
         return statements;
+    }
+
+    /// <summary>
+    /// Schema ownership differences, reported and never acted on. Changing a
+    /// schema's owner is <c>ALTER AUTHORIZATION</c>: a permissions change, whose
+    /// principal may not even exist on the target. A diff tool says so; it does not
+    /// decide it.
+    /// </summary>
+    private static List<string> BuildSchemaOwnerWarnings(DatabaseSnapshot source, DatabaseSnapshot target)
+    {
+        var warnings = new List<string>();
+        if(source.SchemaOwners is null || target.SchemaOwners is null)
+            return warnings;
+
+        var targetOwners = ToCaseInsensitive(target.SchemaOwners);
+        foreach(var (schema, sourceOwner) in source.SchemaOwners.OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            if(!targetOwners.TryGetValue(schema, out var targetOwner) ||
+                string.Equals(sourceOwner, targetOwner, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            warnings.Add($"-- WARNING: schema [{schema}] is owned by [{sourceOwner}] on source and " +
+                         $"[{targetOwner}] on target; ownership is reported, not changed.");
+        }
+
+        if(warnings.Count > 0)
+            warnings.Add(string.Empty);
+
+        return warnings;
+    }
+
+    /// <summary>
+    /// A case-insensitive copy. Built key by key rather than through the dictionary
+    /// copy constructor, which throws when a JSON-deserialized (ordinal) dictionary
+    /// happens to hold two keys that differ only by case.
+    /// </summary>
+    private static Dictionary<string, string> ToCaseInsensitive(Dictionary<string, string>? source)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if(source is null)
+            return result;
+
+        foreach(var pair in source)
+            result[pair.Key] = pair.Value;
+
+        return result;
     }
 
     private static string ComposeScript(
@@ -280,12 +403,6 @@ public sealed class SchemaDiffer
     /// was created with when those are not the script defaults, and closed by its
     /// own <c>GO</c>.
     /// </summary>
-    private static string BuildCreateScript(DbSchemaObject schemaObject, string sql) =>
-        EnsureTrailingGo(SqlRender.WrapWithModuleSessionOptions(
-            sql,
-            schemaObject.UsesAnsiNulls,
-            schemaObject.UsesQuotedIdentifier));
-
     private static string EnsureTrailingGo(string sql)
     {
         var trimmed = sql.TrimEnd();
@@ -300,20 +417,104 @@ public sealed class SchemaDiffer
 
     private static string ToCreateOrAlter(DbSchemaObject schemaObject)
     {
-        if(schemaObject.Type is not (DbObjectType.Function or DbObjectType.StoredProcedure or DbObjectType.View))
+        if(schemaObject.Type is not (DbObjectType.Function or DbObjectType.StoredProcedure
+            or DbObjectType.View or DbObjectType.Trigger))
+        {
             return schemaObject.Definition;
+        }
 
         return SqlModuleRewriter.ToCreateOrAlter(schemaObject.Definition);
     }
 
+    /// <summary>
+    /// The CREATE batch for an object, plus anything that has to surround or follow
+    /// it. A module created under non-default <c>ANSI_NULLS</c> or
+    /// <c>QUOTED_IDENTIFIER</c> is wrapped in the matching <c>SET</c> batches, because
+    /// SQL Server records those settings at create time and re-applies them on every
+    /// run. A disabled trigger gets its <c>DISABLE</c> re-applied after every create
+    /// or alter, since the state is not part of the module text and
+    /// <c>ALTER TRIGGER</c> re-enables what it touches.
+    /// </summary>
+    private static string BuildCreateScript(DbSchemaObject schemaObject, string definition)
+    {
+        var script = EnsureTrailingGo(SqlRender.WrapWithModuleSessionOptions(
+            definition,
+            schemaObject.UsesAnsiNulls,
+            schemaObject.UsesQuotedIdentifier));
+        if(schemaObject.Type != DbObjectType.Trigger || schemaObject.Trigger is not { IsDisabled: true } trigger)
+            return script;
+
+        return script +
+               SqlRender.BuildTriggerDisable(schemaObject.Schema, schemaObject.Name, trigger) +
+               Environment.NewLine + "GO" + Environment.NewLine;
+    }
+
+    /// <summary>
+    /// The <c>DISABLE</c>/<c>ENABLE TRIGGER</c> needed to make the target's enabled
+    /// state match the source's, or null when it already does (or when either side
+    /// has no structured trigger model, as on a pre-1.6 snapshot).
+    /// </summary>
+    private static string? BuildTriggerStateChange(DbSchemaObject source, DbSchemaObject target)
+    {
+        if(source.Type != DbObjectType.Trigger || source.Trigger is null || target.Trigger is null)
+            return null;
+
+        if(source.Trigger.IsDisabled == target.Trigger.IsDisabled)
+            return null;
+
+        return source.Trigger.IsDisabled
+            ? SqlRender.BuildTriggerDisable(source.Schema, source.Name, source.Trigger)
+            : SqlRender.BuildTriggerEnable(source.Schema, source.Name, source.Trigger);
+    }
+
+    private static bool TableTypesEqual(TableTypeModel source, TableTypeModel target) =>
+        string.Equals(
+            SchemaTextNormalizer.Normalize(SqlRender.BuildTableTypeCreateScript(source)),
+            SchemaTextNormalizer.Normalize(SqlRender.BuildTableTypeCreateScript(target)),
+            StringComparison.Ordinal);
+
+    private static List<string> BuildTableTypeRecreateWarnings(DatabaseSnapshot source, DbSchemaObject tableType)
+    {
+        var dependents = source.Objects
+            .Where(x => x.Dependencies.Contains(tableType.Key, StringComparer.OrdinalIgnoreCase))
+            .Select(x => x.Identifier)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var warnings = new List<string>
+        {
+            $"-- WARNING: table type {tableType.Identifier} changed and is recreated; a table type cannot be altered.",
+            "-- DROP TYPE fails while any module still references it: drop those modules first and recreate them after."
+        };
+
+        if(dependents.Count > 0)
+            warnings.Add($"-- Referenced by: {string.Join(", ", dependents)}");
+
+        warnings.Add(string.Empty);
+        return warnings;
+    }
+
     private static string BuildDropStatement(DbSchemaObject schemaObject, bool includeIfExists)
     {
+        // A table type is a type, not an object: OBJECT_ID never finds one, so both
+        // the guard and the DROP are spelled differently from every other kind.
+        if(schemaObject.Type == DbObjectType.TableType)
+        {
+            return includeIfExists
+                ? $"IF TYPE_ID(N'{schemaObject.Identifier}') IS NOT NULL{Environment.NewLine}" +
+                  $"    DROP TYPE {schemaObject.Identifier};{Environment.NewLine}GO{Environment.NewLine}"
+                : $"DROP TYPE {schemaObject.Identifier};{Environment.NewLine}GO{Environment.NewLine}";
+        }
+
         var objectKind = schemaObject.Type switch
         {
             DbObjectType.Table => "TABLE",
             DbObjectType.View => "VIEW",
             DbObjectType.StoredProcedure => "PROCEDURE",
             DbObjectType.Function => "FUNCTION",
+            DbObjectType.Trigger => "TRIGGER",
+            DbObjectType.Sequence => "SEQUENCE",
             _ => throw new InvalidOperationException($"Unsupported object type: {schemaObject.Type}")
         };
 
@@ -327,23 +528,41 @@ public sealed class SchemaDiffer
         return $"DROP {objectKind} {schemaObject.Identifier};{Environment.NewLine}GO{Environment.NewLine}";
     }
 
+    /// <summary>
+    /// The tie-breaker the topological sort falls back on when two objects have no
+    /// dependency between them. Sequences and table types come before tables and
+    /// modules because a column default or a table-valued parameter cannot name one
+    /// that does not exist yet; triggers come last because they need their parent
+    /// table and everything the trigger body touches.
+    /// </summary>
     private static int GetCreateOrder(DbSchemaObject schemaObject) => schemaObject.Type switch
     {
-        DbObjectType.Table => 0,
-        DbObjectType.Function => 1,
-        DbObjectType.View => 2,
-        DbObjectType.StoredProcedure => 3,
+        DbObjectType.Sequence => 0,
+        DbObjectType.TableType => 1,
+        DbObjectType.Table => 2,
+        DbObjectType.Function => 3,
+        DbObjectType.View => 4,
+        DbObjectType.StoredProcedure => 5,
+        DbObjectType.Trigger => 6,
         _ => 99
     };
 
     private static int GetCreateOrder(PendingCreate schemaObject) => GetCreateOrder(schemaObject.Object);
 
+    /// <summary>
+    /// Drops run the other way round, so nothing is dropped while something that
+    /// needs it is still there: triggers first, then modules and tables, and the
+    /// sequences and table types they lean on last.
+    /// </summary>
     private static int GetDropOrder(DbSchemaObject schemaObject) => schemaObject.Type switch
     {
-        DbObjectType.View => 0,
-        DbObjectType.StoredProcedure => 1,
-        DbObjectType.Function => 2,
-        DbObjectType.Table => 3,
+        DbObjectType.Trigger => 0,
+        DbObjectType.View => 1,
+        DbObjectType.StoredProcedure => 2,
+        DbObjectType.Function => 3,
+        DbObjectType.Table => 4,
+        DbObjectType.TableType => 5,
+        DbObjectType.Sequence => 6,
         _ => 99
     };
 

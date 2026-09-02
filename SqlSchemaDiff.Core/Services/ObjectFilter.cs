@@ -63,6 +63,7 @@ public sealed class ObjectFilter
             DatabaseName = snapshot.DatabaseName,
             GeneratedAtUtc = snapshot.GeneratedAtUtc,
             Schemas = snapshot.Schemas,
+            SchemaOwners = snapshot.SchemaOwners,
             Types = snapshot.Types,
             Objects = snapshot.Objects.Where(ShouldInclude).ToList()
         };
@@ -124,12 +125,19 @@ public sealed class ObjectFilter
                    _glob.IsMatch(schemaObject.Name);
         }
 
+        // "type:" means a user-defined TABLE type, which is the only kind of type
+        // that is an object in its own right here. Alias types travel in
+        // DatabaseSnapshot.Types as prerequisites, never as filterable objects, so
+        // there is nothing for the prefix to collide with.
         private static DbObjectType? ToType(string text) => text.Trim().ToLowerInvariant() switch
         {
             "table" or "tables" => DbObjectType.Table,
             "view" or "views" => DbObjectType.View,
             "proc" or "procs" or "procedure" or "procedures" => DbObjectType.StoredProcedure,
             "func" or "funcs" or "function" or "functions" => DbObjectType.Function,
+            "trigger" or "triggers" => DbObjectType.Trigger,
+            "sequence" or "sequences" or "seq" or "seqs" => DbObjectType.Sequence,
+            "tabletype" or "tabletypes" or "type" or "types" or "tvp" => DbObjectType.TableType,
             _ => null
         };
 

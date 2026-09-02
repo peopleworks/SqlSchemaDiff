@@ -1,11 +1,19 @@
 namespace SqlSchemaDiff.Services;
 
 /// <summary>
-/// Rewrites the stored text of a programmable object (view, procedure, function)
-/// so it can be re-applied to a database where the object already exists.
+/// Rewrites the stored text of a programmable object (view, procedure, function,
+/// trigger) so it can be re-applied to a database where the object already exists.
 /// </summary>
 public static class SqlModuleRewriter
 {
+    /// <summary>
+    /// The object kinds SQL Server accepts after <c>CREATE OR ALTER</c>. Anything
+    /// else — a CREATE TABLE that reached here by accident, say — is left alone:
+    /// <c>CREATE OR ALTER TABLE</c> is a syntax error, and silently producing one
+    /// is worse than leaving the text untouched.
+    /// </summary>
+    private static readonly string[] AlterableKinds = { "VIEW", "PROCEDURE", "PROC", "FUNCTION", "TRIGGER" };
+
     /// <summary>
     /// Turns the leading <c>CREATE</c> into <c>CREATE OR ALTER</c>.
     /// <para>
@@ -37,6 +45,9 @@ public static class SqlModuleRewriter
         // Already a CREATE OR ALTER: leave it alone.
         var afterKeyword = SkipLeadingTrivia(definition, afterCreate);
         if(Matches(definition, afterKeyword, "OR"))
+            return definition;
+
+        if(!AlterableKinds.Any(kind => Matches(definition, afterKeyword, kind)))
             return definition;
 
         return definition[..afterCreate] + " OR ALTER" + definition[afterCreate..];

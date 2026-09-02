@@ -32,9 +32,34 @@ public sealed class DbSchemaObject
     /// <summary><c>sys.sql_modules.uses_quoted_identifier</c>. See <see cref="UsesAnsiNulls"/>.</summary>
     public bool? UsesQuotedIdentifier { get; init; }
 
+    /// <summary>
+    /// Structured trigger metadata. Populated only for <see cref="DbObjectType.Trigger"/>.
+    /// Null on snapshots written before 1.6.
+    /// </summary>
+    public TriggerModel? Trigger { get; init; }
+
+    /// <summary>
+    /// Structured sequence metadata. Populated only for <see cref="DbObjectType.Sequence"/>.
+    /// Null on snapshots written before 1.6.
+    /// </summary>
+    public SequenceModel? Sequence { get; init; }
+
+    /// <summary>
+    /// Structured table-type metadata. Populated only for <see cref="DbObjectType.TableType"/>.
+    /// Null on snapshots written before 1.6.
+    /// </summary>
+    public TableTypeModel? TableType { get; init; }
+
     [JsonIgnore]
     public string Identifier => $"[{Schema}].[{Name}]";
 
     [JsonIgnore]
-    public string Key => $"{Type}:{Schema}.{Name}";
+    public string Key => BuildKey(Type, Schema, Name);
+
+    /// <summary>
+    /// The identity used for matching objects across snapshots and for the entries
+    /// in <see cref="Dependencies"/>. Exposed so producers of dependency edges
+    /// (the extractor, the sequence scanner) cannot drift from <see cref="Key"/>.
+    /// </summary>
+    public static string BuildKey(DbObjectType type, string schema, string name) => $"{type}:{schema}.{name}";
 }
