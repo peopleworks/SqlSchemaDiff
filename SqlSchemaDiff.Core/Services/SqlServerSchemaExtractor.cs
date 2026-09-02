@@ -11,6 +11,22 @@ namespace SqlSchemaDiff.Services;
 /// </summary>
 public sealed class SqlServerSchemaExtractor
 {
+    /// <summary>
+    /// Tables and table types have the same catalog shape: a table type's columns,
+    /// keys and checks hang off <c>sys.table_types.type_table_object_id</c> exactly
+    /// as a table's hang off its <c>object_id</c>. Feeding both through one derived
+    /// table keeps every reader set-based and single-round-trip, and lets a table
+    /// type reuse the table models rather than duplicating them.
+    /// </summary>
+    private const string ColumnOwners = """
+                                        (
+                                            SELECT object_id FROM sys.tables WHERE is_ms_shipped = 0
+                                            UNION ALL
+                                            SELECT type_table_object_id FROM sys.table_types
+                                            WHERE is_user_defined = 1 AND is_assembly_type = 0
+                                        )
+                                        """;
+
     /// <summary>Objects skipped or partially captured during extraction, with the reason.</summary>
     public List<string> Notices { get; } = new();
 
@@ -24,16 +40,24 @@ public sealed class SqlServerSchemaExtractor
         var databaseName = (await ExecuteScalarAsync(connection, "SELECT DB_NAME();", cancellationToken))?.ToString() ?? "UNKNOWN";
 
         var tables = await GetTablesAsync(connection, cancellationToken);
+        var periods = await GetPeriodsAsync(connection, cancellationToken);
         var columns = await GetColumnsAsync(connection, cancellationToken);
         var indexColumns = await GetIndexColumnsAsync(connection, cancellationToken);
-        var keyConstraints = await GetKeyConstraintsAsync(connection, indexColumns, cancellationToken);
+        var compression = await GetDataCompressionAsync(connection, cancellationToken);
+        var keyConstraints = await GetKeyConstraintsAsync(connection, indexColumns, compression, cancellationToken);
         var foreignKeys = await GetForeignKeysAsync(connection, cancellationToken);
         var checkConstraints = await GetCheckConstraintsAsync(connection, cancellationToken);
-        var indexes = await GetIndexesAsync(connection, indexColumns, cancellationToken);
+        var indexes = await GetIndexesAsync(connection, indexColumns, compression, cancellationToken);
+        var sequences = await GetSequencesAsync(connection, cancellationToken);
+        var moduleDependencies = await GetModuleDependenciesAsync(connection, cancellationToken);
 
         var objects = new List<DbSchemaObject>();
+        objects.AddRange(sequences.Select(BuildSequenceObject));
+        objects.AddRange(await ExtractTableTypesAsync(connection, columns, keyConstraints, checkConstraints, cancellationToken));
+
         foreach(var table in tables)
         {
+            periods.TryGetValue(table.ObjectId, out var period);
             var model = new TableModel
             {
                 Schema = table.Schema,
@@ -42,11 +66,30 @@ public sealed class SqlServerSchemaExtractor
                 KeyConstraints = Take(keyConstraints, table.ObjectId),
                 ForeignKeys = Take(foreignKeys, table.ObjectId),
                 CheckConstraints = Take(checkConstraints, table.ObjectId),
-                Indexes = Take(indexes, table.ObjectId)
+                Indexes = Take(indexes, table.ObjectId),
+                // index_id 0 is a heap, 1 a clustered index; a table has exactly one
+                // of the two and its compression is the table's own.
+                DataCompression = LookupCompression(compression, table.ObjectId, 0)
+                                  ?? LookupCompression(compression, table.ObjectId, 1),
+                IsMemoryOptimized = table.IsMemoryOptimized,
+                Durability = table.IsMemoryOptimized ? table.DurabilityDesc : null,
+                TemporalType = table.TemporalTypeDesc,
+                HistoryTableSchema = table.HistorySchema,
+                HistoryTableName = table.HistoryName,
+                PeriodStartColumn = period.Start,
+                PeriodEndColumn = period.End
             };
+
+            // A column default of NEXT VALUE FOR ties the table to a sequence that
+            // must already exist. That edge is nowhere in the catalog's relational
+            // views — only inside the default's expression text — so it is read from
+            // there, which also makes it survive a JSON round trip.
+            var sequenceEdges = model.Columns
+                .SelectMany(column => SequenceReferenceFinder.FindDependencyKeys(column.DefaultDefinition, sequences, table.Schema));
 
             var dependencies = model.ForeignKeys
                 .Select(x => BuildKey(DbObjectType.Table, x.ReferencedSchema, x.ReferencedTable))
+                .Concat(sequenceEdges)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
                 .ToList();
@@ -62,13 +105,14 @@ public sealed class SqlServerSchemaExtractor
             });
         }
 
-        objects.AddRange(await ExtractProgrammableObjectsAsync(connection, cancellationToken));
+        objects.AddRange(await ExtractProgrammableObjectsAsync(connection, moduleDependencies, cancellationToken));
+        objects.AddRange(await ExtractTriggersAsync(connection, tables, moduleDependencies, cancellationToken));
 
         var allTypes = await GetAliasTypesAsync(connection, cancellationToken);
+        // Both tables and table types can have alias-typed columns, and either one
+        // makes the alias type a prerequisite of the script.
         var usedTypeKeys = objects
-            .Where(x => x.Table is not null)
-            .SelectMany(x => x.Table!.Columns)
-            .Where(c => c.IsUserDefinedType)
+            .SelectMany(AliasTypedColumns)
             .Select(c => $"{c.TypeSchema}.{c.TypeName}")
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
@@ -91,6 +135,7 @@ public sealed class SqlServerSchemaExtractor
             DatabaseName = databaseName,
             GeneratedAtUtc = DateTimeOffset.UtcNow,
             Schemas = schemas,
+            SchemaOwners = await GetSchemaOwnersAsync(connection, schemas, cancellationToken),
             Types = usedTypes,
             Objects = objects
         };
@@ -105,9 +150,16 @@ public sealed class SqlServerSchemaExtractor
                                t.object_id,
                                s.name AS schema_name,
                                t.name,
-                               t.temporal_type
+                               t.temporal_type,
+                               t.temporal_type_desc,
+                               hs.name AS history_schema,
+                               ht.name AS history_name,
+                               t.is_memory_optimized,
+                               t.durability_desc
                            FROM sys.tables t
                            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
+                           LEFT JOIN sys.tables ht ON ht.object_id = t.history_table_id
+                           LEFT JOIN sys.schemas hs ON hs.schema_id = ht.schema_id
                            WHERE t.is_ms_shipped = 0
                            ORDER BY s.name, t.name;
                            """;
@@ -133,15 +185,62 @@ public sealed class SqlServerSchemaExtractor
             if(temporalType == 2)
                 Notices.Add($"[{schema}].[{name}] is system-versioned; the SYSTEM_VERSIONING clause is not scripted");
 
-            tables.Add(new TableInfo(reader.GetInt32(0), schema, name));
+            // A memory-optimized table has to declare its indexes inside CREATE TABLE
+            // - it cannot be created without at least a primary key, and CREATE INDEX
+            // is rejected on one - so the script this renderer emits would not apply.
+            // Say so rather than hand over a CREATE that fails halfway.
+            var isMemoryOptimized = reader.GetBoolean(7);
+            if(isMemoryOptimized)
+            {
+                Notices.Add($"[{schema}].[{name}] is memory-optimized; its MEMORY_OPTIMIZED and " +
+                            "DURABILITY options and its inline indexes are not scripted");
+            }
+
+            // NON_TEMPORAL is stored as null so an ordinary table carries nothing new
+            // in its snapshot and keeps comparing equal to one taken by an older build.
+            tables.Add(new TableInfo(
+                reader.GetInt32(0), schema, name,
+                temporalType == 0 ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                isMemoryOptimized,
+                reader.IsDBNull(8) ? null : reader.GetString(8)));
         }
 
         return tables;
     }
 
-    private static async Task<ILookup<int, ColumnModel>> GetColumnsAsync(SqlConnection connection, CancellationToken cancellationToken)
+    /// <summary>
+    /// The SYSTEM_TIME period columns of every temporal table. Captured so a future
+    /// composer can emit <c>PERIOD FOR SYSTEM_TIME</c>; nothing renders them yet.
+    /// </summary>
+    private static async Task<Dictionary<int, (string? Start, string? End)>> GetPeriodsAsync(
+        SqlConnection connection, CancellationToken cancellationToken)
     {
         const string sql = """
+                           SELECT
+                               p.object_id,
+                               sc.name AS start_column,
+                               ec.name AS end_column
+                           FROM sys.periods p
+                           INNER JOIN sys.tables t ON t.object_id = p.object_id AND t.is_ms_shipped = 0
+                           INNER JOIN sys.columns sc ON sc.object_id = p.object_id AND sc.column_id = p.start_column_id
+                           INNER JOIN sys.columns ec ON ec.object_id = p.object_id AND ec.column_id = p.end_column_id;
+                           """;
+
+        var result = new Dictionary<int, (string? Start, string? End)>();
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while(await reader.ReadAsync(cancellationToken))
+            result[reader.GetInt32(0)] = (reader.GetString(1), reader.GetString(2));
+
+        return result;
+    }
+
+    private static async Task<ILookup<int, ColumnModel>> GetColumnsAsync(SqlConnection connection, CancellationToken cancellationToken)
+    {
+        const string sql = $"""
                            SELECT
                                c.object_id,
                                c.name,
@@ -162,9 +261,10 @@ public sealed class SqlServerSchemaExtractor
                                dc.definition AS default_definition,
                                dc.is_system_named AS default_is_system_named,
                                CONVERT(varchar(100), ic.seed_value) AS seed_value_text,
-                               CONVERT(varchar(100), ic.increment_value) AS increment_value_text
+                               CONVERT(varchar(100), ic.increment_value) AS increment_value_text,
+                               c.is_sparse
                            FROM sys.columns c
-                           INNER JOIN sys.tables t ON t.object_id = c.object_id AND t.is_ms_shipped = 0
+                           INNER JOIN {ColumnOwners} owner ON owner.object_id = c.object_id
                            INNER JOIN sys.types ty ON c.user_type_id = ty.user_type_id
                            INNER JOIN sys.schemas ts ON ts.schema_id = ty.schema_id
                            LEFT JOIN sys.computed_columns cc ON cc.object_id = c.object_id AND cc.column_id = c.column_id
@@ -199,7 +299,8 @@ public sealed class SqlServerSchemaExtractor
                 DefaultDefinition = reader.IsDBNull(16) ? null : reader.GetString(16),
                 DefaultIsSystemNamed = !reader.IsDBNull(17) && reader.GetBoolean(17),
                 IdentitySeed = reader.IsDBNull(18) ? null : reader.GetString(18),
-                IdentityIncrement = reader.IsDBNull(19) ? null : reader.GetString(19)
+                IdentityIncrement = reader.IsDBNull(19) ? null : reader.GetString(19),
+                IsSparse = reader.GetBoolean(20)
             }));
         }
 
@@ -211,18 +312,24 @@ public sealed class SqlServerSchemaExtractor
     private static async Task<ILookup<int, KeyConstraintModel>> GetKeyConstraintsAsync(
         SqlConnection connection,
         Dictionary<(int ObjectId, int IndexId), List<IndexColumnModel>> indexColumns,
+        Dictionary<(int ObjectId, int IndexId), string> compression,
         CancellationToken cancellationToken)
     {
-        const string sql = """
+        const string sql = $"""
                            SELECT
                                kc.parent_object_id,
                                kc.name,
                                kc.type,
                                kc.unique_index_id,
                                i.type_desc,
-                               kc.is_system_named
+                               kc.is_system_named,
+                               i.fill_factor,
+                               i.is_padded,
+                               i.ignore_dup_key,
+                               i.allow_row_locks,
+                               i.allow_page_locks
                            FROM sys.key_constraints kc
-                           INNER JOIN sys.tables t ON t.object_id = kc.parent_object_id AND t.is_ms_shipped = 0
+                           INNER JOIN {ColumnOwners} owner ON owner.object_id = kc.parent_object_id
                            INNER JOIN sys.indexes i
                                ON i.object_id = kc.parent_object_id
                               AND i.index_id = kc.unique_index_id
@@ -243,7 +350,13 @@ public sealed class SqlServerSchemaExtractor
                 TypeCode = reader.GetString(2).Trim(),
                 IndexTypeDesc = reader.GetString(4),
                 IsSystemNamed = reader.GetBoolean(5),
-                Columns = Lookup(indexColumns, parentObjectId, indexId).Where(x => !x.IsIncluded).ToList()
+                Columns = Lookup(indexColumns, parentObjectId, indexId).Where(x => !x.IsIncluded).ToList(),
+                FillFactor = reader.GetByte(6),
+                IsPadded = reader.GetBoolean(7),
+                IgnoreDupKey = reader.GetBoolean(8),
+                AllowRowLocks = reader.GetBoolean(9),
+                AllowPageLocks = reader.GetBoolean(10),
+                DataCompression = LookupCompression(compression, parentObjectId, indexId)
             }));
         }
 
@@ -336,7 +449,7 @@ public sealed class SqlServerSchemaExtractor
 
     private static async Task<ILookup<int, CheckConstraintModel>> GetCheckConstraintsAsync(SqlConnection connection, CancellationToken cancellationToken)
     {
-        const string sql = """
+        const string sql = $"""
                            SELECT
                                cc.parent_object_id,
                                cc.name,
@@ -345,7 +458,7 @@ public sealed class SqlServerSchemaExtractor
                                cc.is_disabled,
                                cc.is_system_named
                            FROM sys.check_constraints cc
-                           INNER JOIN sys.tables t ON t.object_id = cc.parent_object_id AND t.is_ms_shipped = 0
+                           INNER JOIN {ColumnOwners} owner ON owner.object_id = cc.parent_object_id
                            ORDER BY cc.parent_object_id, cc.name;
                            """;
 
@@ -373,6 +486,7 @@ public sealed class SqlServerSchemaExtractor
     private async Task<ILookup<int, IndexModel>> GetIndexesAsync(
         SqlConnection connection,
         Dictionary<(int ObjectId, int IndexId), List<IndexColumnModel>> indexColumns,
+        Dictionary<(int ObjectId, int IndexId), string> compression,
         CancellationToken cancellationToken)
     {
         const string sql = """
@@ -386,7 +500,12 @@ public sealed class SqlServerSchemaExtractor
                                i.is_disabled,
                                i.type,
                                s.name AS schema_name,
-                               t.name AS table_name
+                               t.name AS table_name,
+                               i.fill_factor,
+                               i.is_padded,
+                               i.ignore_dup_key,
+                               i.allow_row_locks,
+                               i.allow_page_locks
                            FROM sys.indexes i
                            INNER JOIN sys.tables t ON t.object_id = i.object_id AND t.is_ms_shipped = 0
                            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
@@ -408,13 +527,14 @@ public sealed class SqlServerSchemaExtractor
             var name = reader.GetString(2);
             var indexType = reader.GetByte(7);
 
-            // 1 = clustered rowstore, 2 = nonclustered rowstore. Columnstore, XML,
-            // spatial and hash indexes need syntax this renderer does not emit, so
-            // they are reported rather than silently dropped from the snapshot.
-            if(indexType is not (1 or 2))
+            // 1 = clustered rowstore, 2 = nonclustered rowstore, 5 = clustered
+            // columnstore, 6 = nonclustered columnstore. XML, spatial and hash
+            // indexes need syntax this renderer does not emit, so they are reported
+            // rather than silently dropped from the snapshot.
+            if(indexType is not (1 or 2 or 5 or 6))
             {
                 Notices.Add($"skipped index [{name}] on [{reader.GetString(8)}].[{reader.GetString(9)}]: " +
-                            $"unsupported index type {reader.GetString(4)}");
+                            $"{DescribeIndexKind(indexType, reader.GetString(4))} indexes are not scripted");
                 continue;
             }
 
@@ -425,7 +545,16 @@ public sealed class SqlServerSchemaExtractor
                 TypeDesc = reader.GetString(4),
                 FilterDefinition = reader.IsDBNull(5) ? null : reader.GetString(5),
                 IsDisabled = reader.GetBoolean(6),
-                Columns = Lookup(indexColumns, objectId, indexId)
+                // A clustered columnstore index covers the whole table implicitly and
+                // is scripted with no column list. Capturing the list anyway would
+                // make every added column read as a change to the index.
+                Columns = indexType == 5 ? new List<IndexColumnModel>() : Lookup(indexColumns, objectId, indexId),
+                FillFactor = reader.GetByte(10),
+                IsPadded = reader.GetBoolean(11),
+                IgnoreDupKey = reader.GetBoolean(12),
+                AllowRowLocks = reader.GetBoolean(13),
+                AllowPageLocks = reader.GetBoolean(14),
+                DataCompression = LookupCompression(compression, objectId, indexId)
             }));
         }
 
@@ -434,7 +563,7 @@ public sealed class SqlServerSchemaExtractor
 
     private static async Task<Dictionary<(int, int), List<IndexColumnModel>>> GetIndexColumnsAsync(SqlConnection connection, CancellationToken cancellationToken)
     {
-        const string sql = """
+        const string sql = $"""
                            SELECT
                                ic.object_id,
                                ic.index_id,
@@ -444,7 +573,7 @@ public sealed class SqlServerSchemaExtractor
                                ic.is_included_column,
                                ic.index_column_id
                            FROM sys.index_columns ic
-                           INNER JOIN sys.tables t ON t.object_id = ic.object_id AND t.is_ms_shipped = 0
+                           INNER JOIN {ColumnOwners} owner ON owner.object_id = ic.object_id
                            INNER JOIN sys.columns c
                                ON c.object_id = ic.object_id
                               AND c.column_id = ic.column_id
@@ -476,6 +605,48 @@ public sealed class SqlServerSchemaExtractor
 
         return result;
     }
+
+    /// <summary>
+    /// Compression per index, from partition 1. Partitioned tables can compress each
+    /// partition differently; only the first is captured, because the renderer emits
+    /// a single unqualified DATA_COMPRESSION and a partition scheme is out of scope.
+    /// </summary>
+    private static async Task<Dictionary<(int ObjectId, int IndexId), string>> GetDataCompressionAsync(
+        SqlConnection connection, CancellationToken cancellationToken)
+    {
+        const string sql = """
+                           SELECT
+                               p.object_id,
+                               p.index_id,
+                               p.data_compression_desc
+                           FROM sys.partitions p
+                           INNER JOIN sys.tables t ON t.object_id = p.object_id AND t.is_ms_shipped = 0
+                           WHERE p.partition_number = 1;
+                           """;
+
+        var result = new Dictionary<(int ObjectId, int IndexId), string>();
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while(await reader.ReadAsync(cancellationToken))
+        {
+            if(reader.IsDBNull(2))
+                continue;
+
+            result[(reader.GetInt32(0), reader.GetInt32(1))] = reader.GetString(2);
+        }
+
+        return result;
+    }
+
+    /// <summary>Names an index kind for a notice about one this renderer skips.</summary>
+    private static string DescribeIndexKind(byte indexType, string typeDesc) => indexType switch
+    {
+        3 => "XML",
+        4 => "spatial",
+        7 => "memory-optimized hash",
+        _ => typeDesc
+    };
 
     // ----------------------------------------------------------- alias types
 
@@ -526,17 +697,20 @@ public sealed class SqlServerSchemaExtractor
 
     // -------------------------------------------------- programmable objects
 
-    private static async Task<List<DbSchemaObject>> ExtractProgrammableObjectsAsync(SqlConnection connection, CancellationToken cancellationToken)
+    private static async Task<List<DbSchemaObject>> ExtractProgrammableObjectsAsync(
+        SqlConnection connection,
+        Dictionary<int, List<string>> dependencyMap,
+        CancellationToken cancellationToken)
     {
-        var dependencyMap = await GetProgrammableDependenciesAsync(connection, cancellationToken);
-
         const string sql = """
                            SELECT
                                o.object_id,
                                o.type,
                                s.name AS schema_name,
                                o.name,
-                               m.definition
+                               m.definition,
+                               m.uses_ansi_nulls,
+                               m.uses_quoted_identifier
                            FROM sys.objects o
                            INNER JOIN sys.schemas s ON s.schema_id = o.schema_id
                            INNER JOIN sys.sql_modules m ON m.object_id = o.object_id
@@ -579,50 +753,103 @@ public sealed class SqlServerSchemaExtractor
                 Schema = schema,
                 Name = name,
                 Definition = definition,
-                Dependencies = dependencies
+                Dependencies = dependencies,
+
+                // SQL Server re-applies these when the module runs, so a module
+                // created with one of them OFF has to be recreated the same way.
+                UsesAnsiNulls = reader.IsDBNull(5) ? null : reader.GetBoolean(5),
+                UsesQuotedIdentifier = reader.IsDBNull(6) ? null : reader.GetBoolean(6)
             });
         }
 
         return result;
     }
 
-    private static async Task<Dictionary<int, List<string>>> GetProgrammableDependenciesAsync(SqlConnection connection, CancellationToken cancellationToken)
+    /// <summary>
+    /// What each module (view, procedure, function or trigger) references, as
+    /// <see cref="DbSchemaObject.Key"/> values.
+    /// </summary>
+    private static async Task<Dictionary<int, List<string>>> GetModuleDependenciesAsync(SqlConnection connection, CancellationToken cancellationToken)
     {
-        const string sql = """
-                           SELECT
-                               sed.referencing_id,
-                               ro.type AS referenced_type,
-                               rs.name AS referenced_schema,
-                               ro.name AS referenced_name
-                           FROM sys.sql_expression_dependencies sed
-                           INNER JOIN sys.objects ro ON ro.object_id = sed.referenced_id
-                           INNER JOIN sys.schemas rs ON rs.schema_id = ro.schema_id
-                           WHERE sed.referenced_id IS NOT NULL
-                             AND sed.referencing_id IN (
-                                 SELECT object_id
-                                 FROM sys.objects
-                                 WHERE is_ms_shipped = 0
-                                   AND type IN ('V', 'P', 'FN', 'IF', 'TF', 'FS', 'FT')
-                             )
-                             AND ro.is_ms_shipped = 0
-                             AND ro.type IN ('U', 'V', 'P', 'FN', 'IF', 'TF', 'FS', 'FT');
-                           """;
+        const string referencingModules = """
+                                          SELECT object_id
+                                          FROM sys.objects
+                                          WHERE is_ms_shipped = 0
+                                            AND type IN ('V', 'P', 'FN', 'IF', 'TF', 'FS', 'FT', 'TR')
+                                          """;
+
+        // referenced_class 1 (OBJECT_OR_COLUMN) is the only class whose referenced_id
+        // is an object_id. 'SO' is a sequence: NEXT VALUE FOR inside a module body.
+        const string objectSql = $"""
+                                  SELECT
+                                      sed.referencing_id,
+                                      ro.type AS referenced_type,
+                                      rs.name AS referenced_schema,
+                                      ro.name AS referenced_name
+                                  FROM sys.sql_expression_dependencies sed
+                                  INNER JOIN sys.objects ro ON ro.object_id = sed.referenced_id
+                                  INNER JOIN sys.schemas rs ON rs.schema_id = ro.schema_id
+                                  WHERE sed.referenced_class = 1
+                                    AND sed.referencing_class = 1
+                                    AND sed.referenced_id IS NOT NULL
+                                    AND sed.referencing_id IN (
+                                  {referencingModules}
+                                    )
+                                    AND ro.is_ms_shipped = 0
+                                    AND ro.type IN ('U', 'V', 'P', 'FN', 'IF', 'TF', 'FS', 'FT', 'SO');
+                                  """;
+
+        // referenced_class 6 (TYPE) carries a user_type_id in referenced_id, not an
+        // object_id — joining that to sys.objects would silently match an unrelated
+        // row. It covers both a table-valued parameter and a DECLARE in the body.
+        // Only table types are objects here; alias types travel as prerequisites.
+        const string typeSql = $"""
+                                SELECT
+                                    sed.referencing_id,
+                                    rs.name AS referenced_schema,
+                                    tt.name AS referenced_name
+                                FROM sys.sql_expression_dependencies sed
+                                INNER JOIN sys.table_types tt ON tt.user_type_id = sed.referenced_id
+                                INNER JOIN sys.schemas rs ON rs.schema_id = tt.schema_id
+                                WHERE sed.referenced_class = 6
+                                  AND sed.referencing_class = 1
+                                  AND tt.is_user_defined = 1
+                                  AND tt.is_assembly_type = 0
+                                  AND sed.referencing_id IN (
+                                {referencingModules}
+                                  );
+                                """;
 
         var map = new Dictionary<int, HashSet<string>>();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while(await reader.ReadAsync(cancellationToken))
+        await using(var command = connection.CreateCommand())
         {
-            var referencingId = reader.GetInt32(0);
-            var referencedTypeCode = reader.GetString(1);
-            var referencedSchema = reader.GetString(2);
-            var referencedName = reader.GetString(3);
+            command.CommandText = objectSql;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while(await reader.ReadAsync(cancellationToken))
+            {
+                Add(map, reader.GetInt32(0),
+                    BuildKey(ToDbObjectType(reader.GetString(1)), reader.GetString(2), reader.GetString(3)));
+            }
+        }
 
-            var normalizedType = ToDbObjectType(referencedTypeCode);
-            var dependencyKey = BuildKey(normalizedType, referencedSchema, referencedName);
+        await using(var command = connection.CreateCommand())
+        {
+            command.CommandText = typeSql;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while(await reader.ReadAsync(cancellationToken))
+            {
+                Add(map, reader.GetInt32(0),
+                    BuildKey(DbObjectType.TableType, reader.GetString(1), reader.GetString(2)));
+            }
+        }
 
+        return map.ToDictionary(
+            kvp => kvp.Key,
+            kvp => kvp.Value.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList());
+
+        static void Add(Dictionary<int, HashSet<string>> map, int referencingId, string dependencyKey)
+        {
             if(!map.TryGetValue(referencingId, out var set))
             {
                 set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -631,10 +858,6 @@ public sealed class SqlServerSchemaExtractor
 
             set.Add(dependencyKey);
         }
-
-        return map.ToDictionary(
-            kvp => kvp.Key,
-            kvp => kvp.Value.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList());
     }
 
     internal static DbObjectType ToDbObjectType(string typeCode) => typeCode.Trim() switch
@@ -644,18 +867,323 @@ public sealed class SqlServerSchemaExtractor
         "V" => DbObjectType.View,
         "P" => DbObjectType.StoredProcedure,
         "FN" or "IF" or "TF" or "FS" or "FT" => DbObjectType.Function,
+        "TR" => DbObjectType.Trigger,
+        "SO" => DbObjectType.Sequence,
+        // The table behind a table type. Its sys.objects row carries a generated name
+        // in the sys schema, so the extractor always names one from sys.table_types
+        // instead; the mapping is here for completeness.
+        "TT" => DbObjectType.TableType,
         _ => throw new InvalidOperationException($"Unsupported SQL object type code: '{typeCode.Trim()}'")
     };
+
+    // ---------------------------------------------------------------- triggers
+
+    /// <summary>
+    /// DML triggers on user tables. Database-level DDL triggers and server-level or
+    /// logon triggers are out of scope: they are not schema-bound objects and
+    /// carrying them into another database is a policy decision, not a schema one.
+    /// </summary>
+    private async Task<List<DbSchemaObject>> ExtractTriggersAsync(
+        SqlConnection connection,
+        IReadOnlyCollection<TableInfo> tables,
+        Dictionary<int, List<string>> dependencyMap,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+                           SELECT
+                               tr.object_id,
+                               tr.parent_id,
+                               s.name AS schema_name,
+                               tr.name,
+                               ps.name AS parent_schema,
+                               pt.name AS parent_name,
+                               tr.is_disabled,
+                               tr.is_instead_of_trigger,
+                               m.definition
+                           FROM sys.triggers tr
+                           INNER JOIN sys.objects o ON o.object_id = tr.object_id
+                           INNER JOIN sys.schemas s ON s.schema_id = o.schema_id
+                           INNER JOIN sys.tables pt ON pt.object_id = tr.parent_id
+                           INNER JOIN sys.schemas ps ON ps.schema_id = pt.schema_id
+                           LEFT JOIN sys.sql_modules m ON m.object_id = tr.object_id
+                           WHERE tr.parent_class = 1
+                             AND tr.is_ms_shipped = 0
+                           ORDER BY ps.name, pt.name, tr.name;
+                           """;
+
+        var capturedTables = tables.Select(x => x.ObjectId).ToHashSet();
+
+        var result = new List<DbSchemaObject>();
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while(await reader.ReadAsync(cancellationToken))
+        {
+            var objectId = reader.GetInt32(0);
+            var parentId = reader.GetInt32(1);
+            var schema = reader.GetString(2);
+            var name = reader.GetString(3);
+            var parentSchema = reader.GetString(4);
+            var parentName = reader.GetString(5);
+
+            // The parent table was skipped (a temporal history table, say), so the
+            // trigger has nothing to hang off in this snapshot.
+            if(!capturedTables.Contains(parentId))
+                continue;
+
+            // A CLR trigger has no sys.sql_modules row, and one created WITH
+            // ENCRYPTION has a row with no text. Neither can be scripted.
+            if(reader.IsDBNull(8))
+            {
+                Notices.Add($"skipped trigger [{schema}].[{name}] on [{parentSchema}].[{parentName}]: " +
+                            "no readable definition (CLR or encrypted)");
+                continue;
+            }
+
+            var model = new TriggerModel
+            {
+                ParentSchema = parentSchema,
+                ParentName = parentName,
+                IsDisabled = reader.GetBoolean(6),
+                IsInsteadOf = reader.GetBoolean(7)
+            };
+
+            var dependencies = new[] { BuildKey(DbObjectType.Table, parentSchema, parentName) }
+                .Concat(dependencyMap.TryGetValue(objectId, out var referenced) ? referenced : Enumerable.Empty<string>())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            result.Add(new DbSchemaObject
+            {
+                Type = DbObjectType.Trigger,
+                Schema = schema,
+                Name = name,
+                Definition = reader.GetString(8).Trim(),
+                Dependencies = dependencies,
+                Trigger = model
+            });
+        }
+
+        return result;
+    }
+
+    // --------------------------------------------------------------- sequences
+
+    private static async Task<List<SequenceModel>> GetSequencesAsync(SqlConnection connection, CancellationToken cancellationToken)
+    {
+        // start_value, increment, minimum_value, maximum_value and current_value are
+        // sql_variant. They are converted to text in the server rather than boxed and
+        // reinterpreted here: a decimal(38,0) sequence runs past both long and decimal.
+        const string sql = """
+                           SELECT
+                               s.name AS schema_name,
+                               q.name,
+                               TYPE_NAME(q.user_type_id) AS type_name,
+                               q.precision,
+                               q.scale,
+                               CONVERT(varchar(64), q.start_value) AS start_value,
+                               CONVERT(varchar(64), q.increment) AS increment,
+                               CONVERT(varchar(64), q.minimum_value) AS minimum_value,
+                               CONVERT(varchar(64), q.maximum_value) AS maximum_value,
+                               q.is_cycling,
+                               q.is_cached,
+                               q.cache_size,
+                               CONVERT(varchar(64), q.current_value) AS current_value
+                           FROM sys.sequences q
+                           INNER JOIN sys.schemas s ON s.schema_id = q.schema_id
+                           WHERE q.is_ms_shipped = 0
+                           ORDER BY s.name, q.name;
+                           """;
+
+        var result = new List<SequenceModel>();
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while(await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(new SequenceModel
+            {
+                Schema = reader.GetString(0),
+                Name = reader.GetString(1),
+                TypeName = reader.IsDBNull(2) ? "bigint" : reader.GetString(2),
+                Precision = reader.GetByte(3),
+                Scale = reader.GetByte(4),
+                StartValue = reader.IsDBNull(5) ? string.Empty : reader.GetString(5),
+                Increment = reader.IsDBNull(6) ? string.Empty : reader.GetString(6),
+                MinValue = reader.IsDBNull(7) ? null : reader.GetString(7),
+                MaxValue = reader.IsDBNull(8) ? null : reader.GetString(8),
+                IsCycling = reader.GetBoolean(9),
+                IsCached = reader.GetBoolean(10),
+                CacheSize = reader.IsDBNull(11) ? null : reader.GetInt32(11),
+                CurrentValue = reader.IsDBNull(12) ? null : reader.GetString(12)
+            });
+        }
+
+        return result;
+    }
+
+    private static DbSchemaObject BuildSequenceObject(SequenceModel sequence) => new()
+    {
+        Type = DbObjectType.Sequence,
+        Schema = sequence.Schema,
+        Name = sequence.Name,
+        Definition = SqlRender.BuildSequenceCreate(sequence),
+        Sequence = sequence
+    };
+
+    // ------------------------------------------------------------- table types
+
+    private async Task<List<DbSchemaObject>> ExtractTableTypesAsync(
+        SqlConnection connection,
+        ILookup<int, ColumnModel> columns,
+        ILookup<int, KeyConstraintModel> keyConstraints,
+        ILookup<int, CheckConstraintModel> checkConstraints,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+                           SELECT
+                               tt.type_table_object_id,
+                               s.name AS schema_name,
+                               tt.name,
+                               tt.is_memory_optimized
+                           FROM sys.table_types tt
+                           INNER JOIN sys.schemas s ON s.schema_id = tt.schema_id
+                           WHERE tt.is_user_defined = 1
+                             AND tt.is_assembly_type = 0
+                           ORDER BY s.name, tt.name;
+                           """;
+
+        var withUnscriptedIndexes = await GetTableTypesWithInlineIndexesAsync(connection, cancellationToken);
+
+        var result = new List<DbSchemaObject>();
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while(await reader.ReadAsync(cancellationToken))
+        {
+            var typeTableObjectId = reader.GetInt32(0);
+            var schema = reader.GetString(1);
+            var name = reader.GetString(2);
+
+            if(withUnscriptedIndexes.Contains(typeTableObjectId))
+            {
+                Notices.Add($"[{schema}].[{name}]: inline indexes on a table type are not scripted; " +
+                            "only PRIMARY KEY, UNIQUE and CHECK constraints are");
+            }
+
+            var model = new TableTypeModel
+            {
+                Schema = schema,
+                Name = name,
+                Columns = Take(columns, typeTableObjectId),
+                KeyConstraints = Take(keyConstraints, typeTableObjectId),
+                CheckConstraints = Take(checkConstraints, typeTableObjectId),
+                IsMemoryOptimized = reader.GetBoolean(3)
+            };
+
+            result.Add(new DbSchemaObject
+            {
+                Type = DbObjectType.TableType,
+                Schema = schema,
+                Name = name,
+                Definition = SqlRender.BuildTableTypeCreateScript(model),
+                TableType = model
+            });
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Table types whose definition carries an <c>INDEX</c> clause that is not backing
+    /// a key constraint. Those are not rendered, so they are reported instead.
+    /// </summary>
+    private static async Task<HashSet<int>> GetTableTypesWithInlineIndexesAsync(SqlConnection connection, CancellationToken cancellationToken)
+    {
+        const string sql = """
+                           SELECT DISTINCT i.object_id
+                           FROM sys.indexes i
+                           INNER JOIN sys.table_types tt ON tt.type_table_object_id = i.object_id
+                           WHERE tt.is_user_defined = 1
+                             AND tt.is_assembly_type = 0
+                             AND i.index_id > 0
+                             AND i.is_primary_key = 0
+                             AND i.is_unique_constraint = 0;
+                           """;
+
+        var result = new HashSet<int>();
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while(await reader.ReadAsync(cancellationToken))
+            result.Add(reader.GetInt32(0));
+
+        return result;
+    }
+
+    // ----------------------------------------------------------- schema owners
+
+    private static async Task<Dictionary<string, string>?> GetSchemaOwnersAsync(
+        SqlConnection connection,
+        IReadOnlyCollection<string> schemas,
+        CancellationToken cancellationToken)
+    {
+        if(schemas.Count == 0)
+            return null;
+
+        // schema_id >= 16384 is the block reserved for the schemas that shadow the
+        // fixed database roles; none of them is a user schema.
+        const string sql = """
+                           SELECT s.name, p.name AS owner_name
+                           FROM sys.schemas s
+                           INNER JOIN sys.database_principals p ON p.principal_id = s.principal_id
+                           WHERE s.schema_id < 16384
+                           ORDER BY s.name;
+                           """;
+
+        var wanted = new HashSet<string>(schemas, StringComparer.OrdinalIgnoreCase);
+        var owners = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while(await reader.ReadAsync(cancellationToken))
+        {
+            var schema = reader.GetString(0);
+            if(wanted.Contains(schema))
+                owners[schema] = reader.GetString(1);
+        }
+
+        return owners.Count == 0 ? null : owners;
+    }
 
     // --------------------------------------------------------------- helpers
 
     private static List<T> Take<T>(ILookup<int, T> lookup, int objectId) => lookup[objectId].ToList();
 
+    /// <summary>The alias-typed columns of an object, whether it is a table or a table type.</summary>
+    internal static IEnumerable<ColumnModel> AliasTypedColumns(DbSchemaObject schemaObject) =>
+        (schemaObject.Table?.Columns ?? Enumerable.Empty<ColumnModel>())
+        .Concat(schemaObject.TableType?.Columns ?? Enumerable.Empty<ColumnModel>())
+        .Where(column => column.IsUserDefinedType);
+
     private static List<IndexColumnModel> Lookup(
         Dictionary<(int ObjectId, int IndexId), List<IndexColumnModel>> source, int objectId, int indexId) =>
         source.TryGetValue((objectId, indexId), out var columns) ? columns : new List<IndexColumnModel>();
 
-    private static string BuildKey(DbObjectType type, string schema, string name) => $"{type}:{schema}.{name}";
+    /// <summary>
+    /// Null when nothing was captured for that index, which the renderer and the
+    /// differ both read as "uncompressed".
+    /// </summary>
+    private static string? LookupCompression(
+        Dictionary<(int ObjectId, int IndexId), string> source, int objectId, int indexId) =>
+        source.TryGetValue((objectId, indexId), out var value) ? value : null;
+
+    private static string BuildKey(DbObjectType type, string schema, string name) =>
+        DbSchemaObject.BuildKey(type, schema, name);
 
     private static async Task<object?> ExecuteScalarAsync(SqlConnection connection, string sql, CancellationToken cancellationToken)
     {
@@ -664,5 +1192,8 @@ public sealed class SqlServerSchemaExtractor
         return await command.ExecuteScalarAsync(cancellationToken);
     }
 
-    private sealed record TableInfo(int ObjectId, string Schema, string Name);
+    private sealed record TableInfo(
+        int ObjectId, string Schema, string Name,
+        string? TemporalTypeDesc, string? HistorySchema, string? HistoryName,
+        bool IsMemoryOptimized, string? DurabilityDesc);
 }

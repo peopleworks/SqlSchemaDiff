@@ -119,11 +119,15 @@ dotnet bin/Release/net9.0/sqldiff.dll --help
 ```
 
 **Or as a .NET global tool** — the project packs as one, and the release workflow
-publishes it when a `NUGET_API_KEY` secret is present:
+publishes it to NuGet with trusted publishing, no stored key:
 
 ```bash
-dotnet tool install --global SqlSchemaDiff.Cli   # installs the `sqldiff` command
+dotnet tool install --global PeopleWorks.SqlSchemaDiff.Cli   # installs the `sqldiff` command
 ```
+
+> Until 1.5.0 the packages were `SqlSchemaDiff.Cli` and `SqlSchemaDiff.Core`. Both ids stay
+> on nuget.org, deprecated with a pointer to the family-named ones. The command is still
+> `sqldiff` and the namespaces did not change.
 
 Runs on Windows, Linux and macOS. Works against **SQL Server 2016 and newer**, any
 edition — Developer, Express and Azure SQL included.
@@ -131,12 +135,12 @@ edition — Developer, Express and Azure SQL included.
 ### Or use the engine as a library
 
 The CLI is a thin wrapper over
-[**SqlSchemaDiff.Core**](SqlSchemaDiff.Core/README.md) — the extraction, comparison
+[**PeopleWorks.SqlSchemaDiff.Core**](SqlSchemaDiff.Core/README.md) — the extraction, comparison
 and `ALTER` generation live there, and the package is published alongside the tool so other
 programs can share one implementation instead of copying it.
 
 ```bash
-dotnet add package SqlSchemaDiff.Core
+dotnet add package PeopleWorks.SqlSchemaDiff.Core
 ```
 
 ```csharp
@@ -221,8 +225,12 @@ conservative.
   on the target is reported as a `-- WARNING:` comment and left in place. `--include-drops`
   enables dropping them; dropping whole tables needs `--include-table-drops` on top.
 - **Tables are never rebuilt implicitly.** A changed table produces `ALTER` statements.
-  `--allow-table-rebuild` is the only way to get `DROP`/`CREATE`, and it says plainly that
-  it can lose data.
+  What `ALTER` cannot express — an identity property, for one — is refused with a warning
+  unless you pass `--allow-table-rebuild`, and since 1.6.0 that rebuild **keeps the rows**:
+  the table is created again under a temporary name with the new shape, the rows are
+  copied across, the original is dropped, the copy is renamed into its place, and its
+  keys, indexes, foreign keys and triggers are put back. The script says so at the top of
+  the block, and names what is not carried: permissions and extended properties.
 - **Risky changes are annotated in the script**, not buried in a log:
 
   ```sql
@@ -287,18 +295,18 @@ script it writes is a report; do not pipe it into `apply` without reading it.
 
 | Supported | Not yet |
 |---|---|
-| Tables, columns, identity, computed & persisted columns, collation, defaults | Triggers, sequences, synonyms |
-| Primary keys, unique constraints, check constraints, foreign keys | Table types, CLR types, assemblies |
-| Indexes: clustered, nonclustered, unique, filtered, `INCLUDE`, `DESC` | Columnstore, XML, spatial and hash indexes *(reported, not scripted)* |
-| Views, stored procedures, scalar and table-valued functions | Extended properties, permissions, users and roles |
-| Schemas and user-defined alias types (as prerequisites) | Partition schemes and functions, filegroups |
-| System-named constraints, matched by shape rather than by name | Temporal `SYSTEM_VERSIONING` clauses *(history tables are skipped)* |
+| Tables, columns, identity, computed & persisted columns, collation, defaults, `SPARSE` | Synonyms, CLR types, assemblies |
+| Primary keys, unique constraints, check constraints, foreign keys, with their disabled and untrusted state | Extended properties, permissions, users and roles |
+| Indexes: clustered, nonclustered, unique, filtered, `INCLUDE`, `DESC`, columnstore, with fill factor, padding, lock and compression options | XML, spatial and hash indexes *(reported, not scripted)* |
+| Views, stored procedures, scalar and table-valued functions, DML triggers | Partition schemes and functions, filegroups |
+| Sequences, user-defined table types, alias types, schemas with their owner | Temporal `SYSTEM_VERSIONING` and memory-optimized tables *(captured and reported, not scripted)* |
+| System-named constraints, matched by shape rather than by name | |
 
 Anything in the right-hand column is skipped rather than mangled, and the ones that could
 matter for correctness are **reported on the console** rather than dropped silently:
 
 ```console
-  NOTE: skipped index [CCI_Sales] on [dbo].[Sales]: unsupported index type CLUSTERED COLUMNSTORE
+  NOTE: [dbo].[Employee] is system-versioned; the SYSTEM_VERSIONING clause is not scripted
   NOTE: skipped [dbo].[EmployeeHistory]: temporal history table (managed by SQL Server)
 ```
 
@@ -414,6 +422,9 @@ Services/
   SqlRender                  renders every piece of SQL, shared by extract and diff
   SchemaDiffer               object-level diff, dependency ordering, prerequisites
   TableDiffer                column-level diff producing ALTER statements
+  ScriptComposer             full-database script in dependency-ordered phases
+  DependencyOrder            the topological sort the differ and the composer share
+  SnapshotSerializer         save and load snapshots with one set of JSON options
   SqlModuleRewriter          CREATE -> CREATE OR ALTER, comment-aware
   SqlBatchExecutor           splits on GO, executes in one transaction
   ConnectionStringResolver   option / file / environment, and password masking
@@ -486,7 +497,10 @@ warning comment, and you apply it twice or split it by hand.
 - [x] Credentials that stay off the command line
 - [x] Packaging as a `dotnet tool`
 - [x] `--include` / `--exclude` filters to narrow a comparison
-- [ ] More object types: triggers, sequences, synonyms, table types
+- [x] Triggers, sequences and table types
+- [x] A full script in dependency order, split into the phases a restore runs
+- [x] Live tests against a real SQL Server, in CI and locally
+- [ ] Synonyms
 - [ ] Extended properties
 - [ ] Property-level ignore rules (ignore collation, fill factor, and similar)
 - [ ] `--report` mode: a readable HTML diff alongside the script

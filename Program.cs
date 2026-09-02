@@ -1,6 +1,4 @@
 using System.Reflection;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using SqlSchemaDiff.Models;
 using SqlSchemaDiff.Services;
 
@@ -8,12 +6,6 @@ return await ProgramMain.RunAsync(args);
 
 internal static class ProgramMain
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        WriteIndented = true,
-        Converters = { new JsonStringEnumConverter() }
-    };
-
     public static async Task<int> RunAsync(string[] args)
     {
         if(args.Length == 0)
@@ -74,8 +66,8 @@ internal static class ProgramMain
         await File.WriteAllTextAsync(outSql, script);
         if(!string.IsNullOrWhiteSpace(outJson))
         {
-            var json = JsonSerializer.Serialize(snapshot, JsonOptions);
-            await File.WriteAllTextAsync(outJson, json);
+            var versioned = WithGeneratedBy(snapshot, $"sqldiff {GetVersion()}");
+            await SnapshotSerializer.SaveAsync(versioned, outJson, CancellationToken.None);
         }
 
         PrintSnapshotSummary("Extract", snapshot);
@@ -85,6 +77,24 @@ internal static class ProgramMain
             Console.WriteLine($"Snapshot JSON written to: {Path.GetFullPath(outJson)}");
         return 0;
     }
+
+    /// <summary>
+    /// DatabaseSnapshot's properties are init-only by design, so stamping
+    /// GeneratedBy on the way out means building a copy rather than mutating the
+    /// snapshot the extractor returned.
+    /// </summary>
+    private static DatabaseSnapshot WithGeneratedBy(DatabaseSnapshot snapshot, string generatedBy) =>
+        new()
+        {
+            DatabaseName = snapshot.DatabaseName,
+            GeneratedAtUtc = snapshot.GeneratedAtUtc,
+            Schemas = snapshot.Schemas,
+            Types = snapshot.Types,
+            Objects = snapshot.Objects,
+            SchemaOwners = snapshot.SchemaOwners,
+            FormatVersion = snapshot.FormatVersion,
+            GeneratedBy = generatedBy
+        };
 
     private static async Task<int> RunDiffAsync(CliOptions options, string mode)
     {
@@ -275,11 +285,7 @@ internal static class ProgramMain
             if(!File.Exists(snapshotPath))
                 throw new FileNotFoundException($"Snapshot for {label} not found: {snapshotPath}");
 
-            var json = await File.ReadAllTextAsync(snapshotPath);
-            var snapshot = JsonSerializer.Deserialize<DatabaseSnapshot>(json, JsonOptions);
-            if(snapshot is null)
-                throw new InvalidOperationException($"Invalid snapshot: {snapshotPath}");
-            return snapshot;
+            return await SnapshotSerializer.LoadAsync(snapshotPath, CancellationToken.None);
         }
 
         var connectionString = options.GetConnection(side);
@@ -343,9 +349,14 @@ internal static class ProgramMain
         var views = snapshot.Objects.Count(x => x.Type == DbObjectType.View);
         var procedures = snapshot.Objects.Count(x => x.Type == DbObjectType.StoredProcedure);
         var functions = snapshot.Objects.Count(x => x.Type == DbObjectType.Function);
+        var triggers = snapshot.Objects.Count(x => x.Type == DbObjectType.Trigger);
+        var sequences = snapshot.Objects.Count(x => x.Type == DbObjectType.Sequence);
+        var tableTypes = snapshot.Objects.Count(x => x.Type == DbObjectType.TableType);
 
         Console.WriteLine($"[{label}] Database [{snapshot.DatabaseName}]");
-        Console.WriteLine($"Objects: tables={tables}, views={views}, procs={procedures}, funcs={functions}");
+        Console.WriteLine(
+            $"Objects: tables={tables}, views={views}, procs={procedures}, funcs={functions}, " +
+            $"triggers={triggers}, sequences={sequences}, table types={tableTypes}");
         if(snapshot.Schemas.Count > 0)
             Console.WriteLine($"Schemas: {string.Join(", ", snapshot.Schemas)}");
         if(snapshot.Types.Count > 0)
@@ -422,7 +433,8 @@ internal static class ProgramMain
             Narrowing the comparison (all commands except apply and check-conn):
               --include <patterns>       Compare only what matches. Comma-separated.
               --exclude <patterns>       Skip what matches, applied after --include.
-              A pattern is [type:]glob, where type is table/view/proc/func and glob
+              A pattern is [type:]glob, where type is table/view/proc/func/trigger/
+              sequence/tabletype and glob
               takes * and ? and matches either schema.name or the bare name:
                 --include "Sales.*"              only the Sales schema
                 --exclude "proc:usp_Temp*,dbo.Audit*"

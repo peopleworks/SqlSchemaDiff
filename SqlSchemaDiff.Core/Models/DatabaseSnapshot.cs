@@ -14,10 +14,34 @@ public sealed class DatabaseSnapshot
     public List<string> Schemas { get; init; } = new();
 
     /// <summary>
+    /// Owner (<c>sys.schemas.principal_id</c> resolved through
+    /// <c>sys.database_principals</c>) of each entry in <see cref="Schemas"/>.
+    /// Optional, and separate from <see cref="Schemas"/> on purpose: the list is
+    /// what the script has to create, this only refines how. Null on snapshots
+    /// produced before v1.6 and on databases whose schemas are all owned by
+    /// <c>dbo</c>.
+    /// </summary>
+    public Dictionary<string, string>? SchemaOwners { get; init; }
+
+    /// <summary>
     /// User-defined alias types referenced by captured tables. Like schemas, these
     /// are prerequisites rather than diffable objects. Empty on pre-v1.3 snapshots.
     /// </summary>
     public List<AliasTypeModel> Types { get; init; } = new();
 
     public List<DbSchemaObject> Objects { get; init; } = new();
+
+    /// <summary>
+    /// Version of the snapshot JSON shape itself, not of the tool that wrote it.
+    /// A file with no <c>FormatVersion</c> property predates this field and is
+    /// treated as version 1 — see <see cref="Services.SnapshotSerializer"/>.
+    /// </summary>
+    public int FormatVersion { get; init; } = 1;
+
+    /// <summary>
+    /// Free-form "tool name + version" stamp (e.g. <c>"sqldiff 1.6.0"</c>) recorded
+    /// for diagnosing which producer wrote a snapshot. The extractor does not set
+    /// this; callers that care — the CLI, other consumers — do.
+    /// </summary>
+    public string? GeneratedBy { get; init; }
 }
