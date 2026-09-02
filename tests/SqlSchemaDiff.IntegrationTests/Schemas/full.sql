@@ -160,6 +160,15 @@ GO
 ALTER TABLE ops.AuditEntry NOCHECK CONSTRAINT CK_AuditEntry_EventKind;
 GO
 
+-- A check on the column the ALTER fixture widens. SQL Server refuses ALTER COLUMN
+-- while a check's expression mentions the column ("The object 'CK_AuditEntry_Source'
+-- is dependent on column 'Source'", error 5074), and no catalog view says which
+-- columns a check touches — the answer is only inside the expression. The differ has
+-- to read it, take this down before the ALTER and put it back after.
+ALTER TABLE ops.AuditEntry WITH CHECK
+    ADD CONSTRAINT CK_AuditEntry_Source CHECK (LEN(Source) > 0);
+GO
+
 -- ------------------------------------------------------------------ indexes
 
 -- Unique, filtered, with included columns: three renderer branches in one index.

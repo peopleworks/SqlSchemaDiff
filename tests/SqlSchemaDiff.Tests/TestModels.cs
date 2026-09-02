@@ -16,7 +16,11 @@ internal static class TestModels
         string? collation = null,
         string? defaultName = null,
         string? defaultDefinition = null,
-        bool sparse = false)
+        bool sparse = false,
+        string? identitySeed = null,
+        string? identityIncrement = null,
+        string? computedDefinition = null,
+        bool defaultIsSystemNamed = false)
         => new()
         {
             Name = name,
@@ -27,11 +31,14 @@ internal static class TestModels
             Scale = scale,
             IsNullable = nullable,
             IsIdentity = identity,
-            IdentitySeed = identity ? "1" : null,
-            IdentityIncrement = identity ? "1" : null,
+            IdentitySeed = identity ? identitySeed ?? "1" : null,
+            IdentityIncrement = identity ? identityIncrement ?? "1" : null,
             CollationName = collation,
             DefaultName = defaultName,
             DefaultDefinition = defaultDefinition,
+            DefaultIsSystemNamed = defaultIsSystemNamed,
+            IsComputed = computedDefinition is not null,
+            ComputedDefinition = computedDefinition,
             IsSparse = sparse
         };
 
@@ -93,6 +100,33 @@ internal static class TestModels
                 IsIncluded = true,
                 IndexColumnId = i + 1
             }).ToList()
+        };
+
+    public static CheckConstraintModel Check(string name, string definition)
+        => new() { Name = name, Definition = definition };
+
+    public static ForeignKeyModel ForeignKey(
+        string name, string referencedTable, string parentColumn, string referencedColumn = "Id")
+        => new()
+        {
+            Name = name,
+            ReferencedSchema = "dbo",
+            ReferencedTable = referencedTable,
+            DeleteActionDesc = "NO_ACTION",
+            UpdateActionDesc = "NO_ACTION",
+            Columns = { new ForeignKeyColumnModel { ParentColumn = parentColumn, ReferencedColumn = referencedColumn } }
+        };
+
+    public static DbSchemaObject TriggerObject(
+        string name, string parentSchema, string parentName, bool disabled = false, string? definition = null)
+        => new()
+        {
+            Type = DbObjectType.Trigger,
+            Schema = parentSchema,
+            Name = name,
+            Definition = definition ??
+                $"CREATE TRIGGER [{parentSchema}].[{name}] ON [{parentSchema}].[{parentName}] AFTER UPDATE AS BEGIN SET NOCOUNT ON; END;",
+            Trigger = new TriggerModel { ParentSchema = parentSchema, ParentName = parentName, IsDisabled = disabled }
         };
 
     public static List<IndexColumnModel> IndexColumns(params string[] names)

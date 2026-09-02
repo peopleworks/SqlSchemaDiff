@@ -30,8 +30,20 @@ public sealed class SchemaDiffer
         var emittedObjects = new List<DbSchemaObject>();
         var tableDiffer = new TableDiffer();
 
+        // Which tables have to be rebuilt is worked out before anything is emitted,
+        // because a rebuild reaches outside its own table: it drops the foreign keys
+        // pointing at it and re-creates the triggers on it, and the objects on the
+        // other end of that have to know not to do the same work again.
+        var rebuilds = PlanRebuilds(source, target, targetByKey, includeDrops, allowTableRebuild, tableDiffer);
+
         foreach(var sourceObject in source.Objects.OrderBy(GetCreateOrder).ThenBy(x => x.Key, StringComparer.OrdinalIgnoreCase))
         {
+            // A rebuild drops its table, and DROP TABLE takes every trigger on it, so
+            // the rebuild re-creates them from the source. Whatever this trigger's own
+            // diff would say, the rebuild has already said it.
+            if(rebuilds.HandlesTrigger(sourceObject.Key))
+                continue;
+
             if(!targetByKey.TryGetValue(sourceObject.Key, out var targetObject))
             {
                 deferredCreates.Add(new PendingCreate(sourceObject, BuildCreateScript(sourceObject, sourceObject.Definition)));
@@ -44,15 +56,27 @@ public sealed class SchemaDiffer
             // Tables with structured models on both sides: decide "changed" by the actual
             // structural diff, not by text. This way cosmetic-only differences (e.g. the
             // same columns in a different physical order) are NOT reported as drift, since
-            // reordering columns would require a destructive table rebuild.
+            // reordering columns would require a table rebuild.
+            //
+            // A table the planner marked for rebuild skips the ALTER entirely and emits
+            // the rebuild instead. The rebuild goes out with the creates rather than the
+            // alters so the dependency sort places it: it has to run before any new
+            // table that points a foreign key at it, or the DROP inside it would find
+            // that key in the way.
             if(sourceObject.Type == DbObjectType.Table
-                && !allowTableRebuild
                 && sourceObject.Table is not null
                 && targetObject.Table is not null)
             {
-                var alter = tableDiffer.Diff(sourceObject.Table, targetObject.Table, includeDrops);
-                if(!alter.HasChanges && alter.WarningCount == 0)
-                    continue; // structurally identical; ignore cosmetic text differences
+                var rebuild = rebuilds.Find(sourceObject.Key);
+                TableDiffer.TableAlterResult? alter = null;
+
+                if(rebuild is null)
+                {
+                    alter = tableDiffer.Diff(sourceObject.Table, targetObject.Table, includeDrops,
+                        rebuilds.OptionsFor(sourceObject.Key));
+                    if(!alter.HasChanges && alter.WarningCount == 0)
+                        continue; // structurally identical; ignore cosmetic text differences
+                }
 
                 changed++;
                 changedObjects.Add(sourceObject.Identifier);
@@ -62,7 +86,11 @@ public sealed class SchemaDiffer
                     continue;
                 }
 
-                alterStatements.Add(alter.Script);
+                if(rebuild is not null)
+                    deferredCreates.Add(new PendingCreate(sourceObject, rebuild.Script));
+                else
+                    alterStatements.Add(alter!.Script);
+
                 emittedObjects.Add(sourceObject);
                 continue;
             }
@@ -125,11 +153,9 @@ public sealed class SchemaDiffer
                 continue;
             }
 
-            // Programmable objects, table rebuilds, and legacy tables without a structured
-            // model fall back to normalized-text comparison.
-            var sourceNormalized = SchemaTextNormalizer.Normalize(sourceObject.Definition);
-            var targetNormalized = SchemaTextNormalizer.Normalize(targetObject.Definition);
-            var definitionsMatch = string.Equals(sourceNormalized, targetNormalized, StringComparison.Ordinal);
+            // Programmable objects, and legacy tables without a structured model on one
+            // side or the other, fall back to normalized-text comparison.
+            var definitionsMatch = DefinitionsMatch(sourceObject, targetObject);
 
             // A trigger's enabled state lives outside its module text, so identical
             // definitions are not enough to call it unchanged.
@@ -156,8 +182,22 @@ public sealed class SchemaDiffer
 
             if(sourceObject.Type == DbObjectType.Table)
             {
-                if(allowTableRebuild)
+                var fallbackRebuild = rebuilds.Find(sourceObject.Key);
+                if(fallbackRebuild is not null)
                 {
+                    // The source has a model even though the target does not, which is
+                    // enough to build the new table and copy what the two have in common.
+                    deferredCreates.Add(new PendingCreate(sourceObject, fallbackRebuild.Script));
+                    emittedObjects.Add(sourceObject);
+                }
+                else if(allowTableRebuild)
+                {
+                    // Neither side has a model: there is no shape to build a copy from
+                    // and no column list to copy through, so all that is left is the
+                    // destructive form — said out loud rather than done quietly.
+                    createInfoStatements.Add($"-- WARNING: {sourceObject.Identifier} is dropped and recreated, and its rows are lost.");
+                    createInfoStatements.Add("-- The snapshot holds no structured model for it, so there is nothing to copy the rows into.");
+                    createInfoStatements.Add(string.Empty);
                     dropStatements.Add(BuildDropStatement(sourceObject, includeIfExists: true));
                     deferredCreates.Add(new PendingCreate(sourceObject, BuildCreateScript(sourceObject, sourceObject.Definition)));
                     emittedObjects.Add(sourceObject);
@@ -167,7 +207,7 @@ public sealed class SchemaDiffer
                     // No structured model available (e.g. legacy snapshot): fall back to skip.
                     skipped++;
                     createInfoStatements.Add($"-- WARNING: table changed and was skipped: {sourceObject.Identifier}");
-                    createInfoStatements.Add("-- Use --allow-table-rebuild to generate DROP/CREATE (can cause data loss).");
+                    createInfoStatements.Add("-- Use --allow-table-rebuild to rebuild the table around its rows.");
                     createInfoStatements.Add(string.Empty);
                 }
 
@@ -226,6 +266,76 @@ public sealed class SchemaDiffer
             RemovedObjects = removedObjects
         };
     }
+
+    /// <summary>
+    /// Works out, before a single statement is emitted, which tables cannot be
+    /// reconciled in place and have to be built again around their rows.
+    /// <para>
+    /// This runs first because a rebuild is not a local change. It drops every foreign
+    /// key pointing at the table so the <c>DROP TABLE</c> can go through, puts them
+    /// back from the source afterwards, and re-creates the triggers the drop took with
+    /// it. The tables and triggers on the other end of all that are diffed later in the
+    /// same run, and they need to know the work is already accounted for — otherwise
+    /// they add a foreign key that is already there, or drop one that is already gone.
+    /// </para>
+    /// <para>
+    /// Nothing is planned unless the caller asked for it: without
+    /// <c>allowTableRebuild</c> a table the differ cannot express is reported and left
+    /// alone, which is the whole point of the flag.
+    /// </para>
+    /// </summary>
+    private static RebuildPlan PlanRebuilds(
+        DatabaseSnapshot source,
+        DatabaseSnapshot target,
+        Dictionary<string, DbSchemaObject> targetByKey,
+        bool includeDrops,
+        bool allowTableRebuild,
+        TableDiffer tableDiffer)
+    {
+        var plan = new RebuildPlan();
+        if(!allowTableRebuild)
+            return plan;
+
+        foreach(var sourceObject in source.Objects
+                    .Where(x => x.Type == DbObjectType.Table && x.Table is not null)
+                    .OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            // Missing on the target: a plain CREATE, with no rows to preserve.
+            if(!targetByKey.TryGetValue(sourceObject.Key, out var targetObject))
+                continue;
+
+            List<string> reasons;
+            if(targetObject.Table is not null)
+            {
+                var alter = tableDiffer.Diff(sourceObject.Table!, targetObject.Table, includeDrops);
+                if(!alter.RequiresRebuild)
+                    continue;
+
+                reasons = alter.RebuildReasons.ToList();
+            }
+            else
+            {
+                if(DefinitionsMatch(sourceObject, targetObject))
+                    continue;
+
+                reasons = new List<string>
+                {
+                    "the target snapshot holds no structured model for this table, so the change could not be read column by column"
+                };
+            }
+
+            plan.Add(sourceObject.Key, TableRebuilder.Build(
+                sourceObject.Table!, targetObject.Table, source, target, reasons, includeDrops));
+        }
+
+        return plan;
+    }
+
+    private static bool DefinitionsMatch(DbSchemaObject source, DbSchemaObject target) =>
+        string.Equals(
+            SchemaTextNormalizer.Normalize(source.Definition),
+            SchemaTextNormalizer.Normalize(target.Definition),
+            StringComparison.Ordinal);
 
     /// <summary>
     /// Schemas and alias types the emitted objects depend on. A table in a schema
@@ -567,4 +677,46 @@ public sealed class SchemaDiffer
     };
 
     private sealed record PendingCreate(DbSchemaObject Object, string Script);
+
+    /// <summary>
+    /// The rebuilds one run will emit, and the work they take off everything else's
+    /// hands.
+    /// </summary>
+    private sealed class RebuildPlan
+    {
+        private readonly Dictionary<string, TableRebuildResult> _rebuilds = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, HashSet<string>> _foreignKeys = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _triggers = new(StringComparer.OrdinalIgnoreCase);
+
+        public void Add(string tableKey, TableRebuildResult rebuild)
+        {
+            _rebuilds[tableKey] = rebuild;
+
+            foreach(var foreignKey in rebuild.ForeignKeys)
+            {
+                if(!_foreignKeys.TryGetValue(foreignKey.TableKey, out var keys))
+                    _foreignKeys[foreignKey.TableKey] = keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                keys.Add(foreignKey.MatchKey);
+            }
+
+            foreach(var trigger in rebuild.TriggerKeys)
+                _triggers.Add(trigger);
+        }
+
+        /// <summary>The rebuild planned for a table, or null when it is diffed normally.</summary>
+        public TableRebuildResult? Find(string tableKey) => _rebuilds.GetValueOrDefault(tableKey);
+
+        /// <summary>True when a rebuild re-creates this trigger, so its own diff has nothing to say.</summary>
+        public bool HandlesTrigger(string triggerKey) => _triggers.Contains(triggerKey);
+
+        /// <summary>
+        /// What a table's own diff should leave alone, or null when a rebuild elsewhere
+        /// did not touch it — which is the case for all but a handful of tables, and
+        /// keeps the common path allocating nothing.
+        /// </summary>
+        public TableDiffOptions? OptionsFor(string tableKey) =>
+            _foreignKeys.TryGetValue(tableKey, out var keys)
+                ? new TableDiffOptions { ForeignKeysHandledElsewhere = keys }
+                : null;
+    }
 }

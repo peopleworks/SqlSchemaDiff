@@ -496,6 +496,55 @@ public static class SqlRender
         $"ALTER INDEX {Quote(index.Name)} ON {TableIdentifier(table)} DISABLE;";
 
     /// <summary>
+    /// Brings a disabled index back online. SQL Server has no
+    /// <c>ALTER INDEX ... ENABLE</c>: the index's rows were thrown away when it was
+    /// disabled, so a rebuild is the only way back.
+    /// </summary>
+    public static string BuildIndexRebuild(TableModel table, IndexModel index) =>
+        $"ALTER INDEX {Quote(index.Name)} ON {TableIdentifier(table)} REBUILD;";
+
+    /// <summary>
+    /// Re-enables a constraint and validates the rows already in the table, which is
+    /// what clears <c>is_not_trusted</c> and lets the optimizer rely on it again.
+    /// </summary>
+    public static string BuildConstraintCheck(TableModel table, string name) =>
+        $"ALTER TABLE {TableIdentifier(table)} WITH CHECK CHECK CONSTRAINT {Quote(name)};";
+
+    /// <summary>
+    /// Re-enables a constraint without looking at the rows already in the table, so
+    /// it starts enforcing new rows while staying untrusted.
+    /// </summary>
+    public static string BuildConstraintCheckNoValidate(TableModel table, string name) =>
+        $"ALTER TABLE {TableIdentifier(table)} WITH NOCHECK CHECK CONSTRAINT {Quote(name)};";
+
+    /// <summary>
+    /// A guarded <c>DROP CONSTRAINT</c> for a foreign key. The rebuild takes down
+    /// every key pointing at the table it is about to drop, and the list it works
+    /// from is a snapshot: guarding the drop is what keeps the script re-runnable
+    /// when one of them has already gone.
+    /// </summary>
+    public static string BuildForeignKeyDropIfExists(TableModel table, string name) =>
+        $"IF OBJECT_ID(N'{Literal($"{Quote(table.Schema)}.{Quote(name)}")}', 'F') IS NOT NULL{Environment.NewLine}" +
+        $"    ALTER TABLE {TableIdentifier(table)} DROP CONSTRAINT {Quote(name)};";
+
+    /// <summary>
+    /// <c>sp_rename</c> for an object. The current name goes in as a quoted two-part
+    /// name and the new one bare, because renaming cannot move an object between
+    /// schemas and sp_rename rejects a new name that names one.
+    /// </summary>
+    /// <param name="objectType">
+    /// sp_rename's <c>@objtype</c>. Left null for a table, where the default is what
+    /// is wanted; passed as <c>OBJECT</c> for a constraint, where saying so makes the
+    /// statement readable on its own.
+    /// </param>
+    public static string BuildObjectRename(string schema, string currentName, string newName, string? objectType = null)
+    {
+        var current = Literal($"{Quote(schema)}.{Quote(currentName)}");
+        var suffix = string.IsNullOrWhiteSpace(objectType) ? string.Empty : $", N'{Literal(objectType)}'";
+        return $"EXEC sp_rename N'{current}', N'{Literal(newName)}'{suffix};";
+    }
+
+    /// <summary>
     /// Renders only the <c>CREATE TABLE</c> statement: columns, computed columns,
     /// identity and inline defaults. Everything that can be attached later (keys,
     /// checks, indexes, foreign keys) is left to the callers that place those in
