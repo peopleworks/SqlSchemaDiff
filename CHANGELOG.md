@@ -4,7 +4,7 @@ All notable changes to SQLDiff are recorded here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.6.0] - Unreleased
+## [1.6.0] - 2026-09-02
 
 ### Added
 
