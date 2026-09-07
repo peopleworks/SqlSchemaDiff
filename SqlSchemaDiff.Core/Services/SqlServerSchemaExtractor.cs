@@ -47,7 +47,9 @@ public sealed class SqlServerSchemaExtractor
         var keyConstraints = await GetKeyConstraintsAsync(connection, indexColumns, compression, cancellationToken);
         var foreignKeys = await GetForeignKeysAsync(connection, cancellationToken);
         var checkConstraints = await GetCheckConstraintsAsync(connection, cancellationToken);
-        var indexes = await GetIndexesAsync(connection, indexColumns, compression, cancellationToken);
+        var bucketCounts = await GetHashBucketCountsAsync(connection, cancellationToken);
+        var indexes = await GetIndexesAsync(connection, indexColumns, compression, bucketCounts, cancellationToken);
+        await ApplyKeyConstraintBucketCountsAsync(connection, keyConstraints, cancellationToken);
         var sequences = await GetSequencesAsync(connection, cancellationToken);
         var moduleDependencies = await GetModuleDependenciesAsync(connection, cancellationToken);
 
@@ -125,6 +127,14 @@ public sealed class SqlServerSchemaExtractor
         var schemas = objects
             .Select(x => x.Schema)
             .Concat(usedTypes.Select(t => t.Schema))
+            // A history table is never scripted — SQL Server creates it from the
+            // SYSTEM_VERSIONING clause — but the schema it is created in has to exist
+            // before that clause runs, and nothing else in the snapshot names it.
+            .Concat(objects
+                .Where(x => x.Table is not null)
+                .Select(x => x.Table!.HistoryTableSchema)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Select(x => x!))
             .Where(x => !string.Equals(x, "dbo", StringComparison.OrdinalIgnoreCase))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
@@ -175,25 +185,24 @@ public sealed class SqlServerSchemaExtractor
             var temporalType = reader.GetByte(3);
 
             // 1 = history table of a system-versioned table. SQL Server creates and owns
-            // it, so scripting it separately would produce a CREATE that cannot be applied.
+            // it, so scripting it separately would produce a CREATE that cannot be
+            // applied: the SYSTEM_VERSIONING clause on the current table brings it back.
             if(temporalType == 1)
             {
-                Notices.Add($"skipped [{schema}].[{name}]: temporal history table (managed by SQL Server)");
+                Notices.Add($"skipped [{schema}].[{name}]: history table of a system-versioned table, " +
+                            "which SQL Server creates from the SYSTEM_VERSIONING clause");
                 continue;
             }
 
-            if(temporalType == 2)
-                Notices.Add($"[{schema}].[{name}] is system-versioned; the SYSTEM_VERSIONING clause is not scripted");
-
-            // A memory-optimized table has to declare its indexes inside CREATE TABLE
-            // - it cannot be created without at least a primary key, and CREATE INDEX
-            // is rejected on one - so the script this renderer emits would not apply.
-            // Say so rather than hand over a CREATE that fails halfway.
+            // Everything about a memory-optimized table is scripted since 1.7 except
+            // the one thing no snapshot can know: the filegroup, which names a path on
+            // the server's own disk. The script says so too; this is the machine-
+            // readable half of the same sentence.
             var isMemoryOptimized = reader.GetBoolean(7);
             if(isMemoryOptimized)
             {
-                Notices.Add($"[{schema}].[{name}] is memory-optimized; its MEMORY_OPTIMIZED and " +
-                            "DURABILITY options and its inline indexes are not scripted");
+                Notices.Add($"[{schema}].[{name}] is memory-optimized; the target database must already have " +
+                            "a filegroup CONTAINS MEMORY_OPTIMIZED_DATA, which cannot be scripted");
             }
 
             // NON_TEMPORAL is stored as null so an ordinary table carries nothing new
@@ -211,8 +220,10 @@ public sealed class SqlServerSchemaExtractor
     }
 
     /// <summary>
-    /// The SYSTEM_TIME period columns of every temporal table. Captured so a future
-    /// composer can emit <c>PERIOD FOR SYSTEM_TIME</c>; nothing renders them yet.
+    /// The SYSTEM_TIME period columns of every temporal table, which is what
+    /// <c>PERIOD FOR SYSTEM_TIME</c> is rendered from. A period can exist on a table
+    /// that is not system-versioned, so this is read for every table rather than only
+    /// for the versioned ones.
     /// </summary>
     private static async Task<Dictionary<int, (string? Start, string? End)>> GetPeriodsAsync(
         SqlConnection connection, CancellationToken cancellationToken)
@@ -262,7 +273,9 @@ public sealed class SqlServerSchemaExtractor
                                dc.is_system_named AS default_is_system_named,
                                CONVERT(varchar(100), ic.seed_value) AS seed_value_text,
                                CONVERT(varchar(100), ic.increment_value) AS increment_value_text,
-                               c.is_sparse
+                               c.is_sparse,
+                               c.generated_always_type,
+                               c.is_hidden
                            FROM sys.columns c
                            INNER JOIN {ColumnOwners} owner ON owner.object_id = c.object_id
                            INNER JOIN sys.types ty ON c.user_type_id = ty.user_type_id
@@ -300,7 +313,9 @@ public sealed class SqlServerSchemaExtractor
                 DefaultIsSystemNamed = !reader.IsDBNull(17) && reader.GetBoolean(17),
                 IdentitySeed = reader.IsDBNull(18) ? null : reader.GetString(18),
                 IdentityIncrement = reader.IsDBNull(19) ? null : reader.GetString(19),
-                IsSparse = reader.GetBoolean(20)
+                IsSparse = reader.GetBoolean(20),
+                GeneratedAlwaysType = reader.GetByte(21),
+                IsHidden = reader.GetBoolean(22)
             }));
         }
 
@@ -487,6 +502,7 @@ public sealed class SqlServerSchemaExtractor
         SqlConnection connection,
         Dictionary<(int ObjectId, int IndexId), List<IndexColumnModel>> indexColumns,
         Dictionary<(int ObjectId, int IndexId), string> compression,
+        Dictionary<(int ObjectId, int IndexId), int> bucketCounts,
         CancellationToken cancellationToken)
     {
         const string sql = """
@@ -528,10 +544,10 @@ public sealed class SqlServerSchemaExtractor
             var indexType = reader.GetByte(7);
 
             // 1 = clustered rowstore, 2 = nonclustered rowstore, 5 = clustered
-            // columnstore, 6 = nonclustered columnstore. XML, spatial and hash
-            // indexes need syntax this renderer does not emit, so they are reported
-            // rather than silently dropped from the snapshot.
-            if(indexType is not (1 or 2 or 5 or 6))
+            // columnstore, 6 = nonclustered columnstore, 7 = memory-optimized hash.
+            // XML and spatial indexes need syntax this renderer does not emit, so
+            // they are reported rather than silently dropped from the snapshot.
+            if(indexType is not (1 or 2 or 5 or 6 or 7))
             {
                 Notices.Add($"skipped index [{name}] on [{reader.GetString(8)}].[{reader.GetString(9)}]: " +
                             $"{DescribeIndexKind(indexType, reader.GetString(4))} indexes are not scripted");
@@ -554,11 +570,73 @@ public sealed class SqlServerSchemaExtractor
                 IgnoreDupKey = reader.GetBoolean(12),
                 AllowRowLocks = reader.GetBoolean(13),
                 AllowPageLocks = reader.GetBoolean(14),
-                DataCompression = LookupCompression(compression, objectId, indexId)
+                DataCompression = LookupCompression(compression, objectId, indexId),
+                BucketCount = bucketCounts.GetValueOrDefault((objectId, indexId))
             }));
         }
 
         return rows.ToLookup(x => x.ObjectId, x => x.Model);
+    }
+
+    /// <summary>
+    /// <c>BUCKET_COUNT</c> for every hash index in the database. It is not an option
+    /// a hash index can be scripted without, and it is the one thing
+    /// <c>sys.indexes</c> does not carry, so it is read once and joined in memory
+    /// like every other per-index property.
+    /// </summary>
+    private static async Task<Dictionary<(int ObjectId, int IndexId), int>> GetHashBucketCountsAsync(
+        SqlConnection connection, CancellationToken cancellationToken)
+    {
+        const string sql = """
+                           SELECT h.object_id, h.index_id, h.bucket_count
+                           FROM sys.hash_indexes h
+                           INNER JOIN sys.tables t ON t.object_id = h.object_id AND t.is_ms_shipped = 0;
+                           """;
+
+        var result = new Dictionary<(int, int), int>();
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while(await reader.ReadAsync(cancellationToken))
+            result[(reader.GetInt32(0), reader.GetInt32(1))] = reader.GetInt32(2);
+
+        return result;
+    }
+
+    /// <summary>
+    /// The same figure for a PRIMARY KEY or UNIQUE constraint whose index is a hash —
+    /// which is how a memory-optimized table's primary key normally looks. The
+    /// constraint and the index behind it share a name, so the reader can set the
+    /// value straight onto the models the key-constraint pass already built.
+    /// </summary>
+    private static async Task ApplyKeyConstraintBucketCountsAsync(
+        SqlConnection connection,
+        ILookup<int, KeyConstraintModel> keyConstraints,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+                           SELECT kc.parent_object_id, kc.name, h.bucket_count
+                           FROM sys.key_constraints kc
+                           INNER JOIN sys.hash_indexes h
+                               ON h.object_id = kc.parent_object_id
+                              AND h.index_id = kc.unique_index_id;
+                           """;
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while(await reader.ReadAsync(cancellationToken))
+        {
+            var parentObjectId = reader.GetInt32(0);
+            var name = reader.GetString(1);
+            var bucketCount = reader.GetInt32(2);
+
+            foreach(var keyConstraint in keyConstraints[parentObjectId]
+                        .Where(x => string.Equals(x.Name, name, StringComparison.Ordinal)))
+            {
+                keyConstraint.BucketCount = bucketCount;
+            }
+        }
     }
 
     private static async Task<Dictionary<(int, int), List<IndexColumnModel>>> GetIndexColumnsAsync(SqlConnection connection, CancellationToken cancellationToken)

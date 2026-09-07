@@ -85,6 +85,14 @@ public sealed class TableDiffer
                                  "ADD will fail if the table already has rows. Provide a default or backfill first.");
                 }
 
+                if(col.IsComputed && SqlRender.IsSystemVersioned(source))
+                {
+                    warnings.Add($"-- WARNING: computed column [{col.Name}] cannot be added to a system-versioned " +
+                                 "table; SQL Server refuses it with versioning on, and doing it with versioning off " +
+                                 "leaves the history table a column short.");
+                    rebuildReasons.Add($"computed column [{col.Name}] is added to a system-versioned table, which no ALTER can do");
+                }
+
                 WarnIfSparseNotNull(col, warnings);
                 continue;
             }
@@ -172,6 +180,33 @@ public sealed class TableDiffer
             changeCount++;
         }
 
+        // ---- Temporal and memory-optimized state ----
+        // Last, because the SYSTEM_VERSIONING switches wrap everything above: OFF goes
+        // to the very front of the script and ON to the very end.
+        changeCount += AppendSpecialTableChanges(
+            source, target, pre, post, warnings, rebuildReasons,
+            columnsChange: columnAdds.Count > 0 || columnDrops.Count > 0);
+
+        // A table this differ cannot express is normally handed to TableRebuilder,
+        // which drops it and builds it again around its rows. Neither of these can be
+        // dropped where it stands, so say so here rather than let a DROP be planned
+        // and fail: SchemaDiffer refuses the rebuild for the same two reasons.
+        if(rebuildReasons.Count > 0)
+        {
+            if(SqlRender.IsSystemVersioned(source) || SqlRender.IsSystemVersioned(target))
+            {
+                warnings.Add("-- WARNING: this table is system-versioned and cannot be rebuilt: a table cannot be " +
+                             "dropped while SYSTEM_VERSIONING is ON. Turn versioning off, make the change by hand, " +
+                             "and turn it back on against a history table of the same shape.");
+            }
+            else if(source.IsMemoryOptimized || target.IsMemoryOptimized)
+            {
+                warnings.Add("-- WARNING: this table is memory-optimized and cannot be rebuilt: its keys and indexes " +
+                             "only exist inside CREATE TABLE, so the rebuild's copy would not carry them. " +
+                             "Re-create the table by hand.");
+            }
+        }
+
         var script = Compose(source, pre, columnAdds, columnAlters, columnDrops, post, warnings);
         return new TableAlterResult
         {
@@ -181,6 +216,120 @@ public sealed class TableDiffer
             RebuildReasons = rebuildReasons
         };
     }
+
+    /// <summary>
+    /// The <c>SYSTEM_TIME</c> period and the <c>SYSTEM_VERSIONING</c> switch, plus the
+    /// memory-optimized properties nothing can change in place. Returns how many
+    /// changes it emitted.
+    /// <para>
+    /// Versioning is only switched when it genuinely moves — the state itself, the
+    /// history table, or the period. An ordinary column change is deliberately left to
+    /// run <b>with versioning on</b>: SQL Server propagates an ADD, DROP or ALTER
+    /// COLUMN into the history table itself, and doing it with versioning off leaves
+    /// the two out of step, so turning versioning back on fails with "table has N
+    /// columns and table has M columns".
+    /// </para>
+    /// </summary>
+    private static int AppendSpecialTableChanges(
+        TableModel source, TableModel target,
+        List<string> pre, List<string> post, List<string> warnings, List<string> rebuildReasons,
+        bool columnsChange)
+    {
+        var changes = 0;
+
+        // In-memory is a storage decision taken at CREATE TABLE and never afterwards.
+        if(source.IsMemoryOptimized != target.IsMemoryOptimized)
+        {
+            var direction = source.IsMemoryOptimized ? "becomes memory-optimized" : "stops being memory-optimized";
+            warnings.Add($"-- WARNING: table {direction}, which ALTER TABLE cannot do.");
+            rebuildReasons.Add($"the table {direction}, which only a CREATE TABLE can express");
+            changes++;
+        }
+        else if(source.IsMemoryOptimized && !NameEqual(source.Durability, target.Durability))
+        {
+            warnings.Add($"-- WARNING: DURABILITY moves from {target.Durability} to {source.Durability}, " +
+                         "which ALTER TABLE cannot do.");
+            rebuildReasons.Add($"DURABILITY moves from {target.Durability} to {source.Durability}");
+            changes++;
+        }
+
+        var sourceVersioned = SqlRender.IsSystemVersioned(source);
+        var targetVersioned = SqlRender.IsSystemVersioned(target);
+        var historyMoved = sourceVersioned && targetVersioned &&
+                           (!NameEqual(source.HistoryTableSchema, target.HistoryTableSchema) ||
+                            !NameEqual(source.HistoryTableName, target.HistoryTableName));
+        var periodMoved = !NameEqual(source.PeriodStartColumn, target.PeriodStartColumn) ||
+                          !NameEqual(source.PeriodEndColumn, target.PeriodEndColumn);
+
+        var turnOff = targetVersioned && (!sourceVersioned || historyMoved || periodMoved);
+        var turnOn = sourceVersioned && (!targetVersioned || historyMoved || periodMoved);
+
+        // pre already holds the constraint and index drops. These two belong in front
+        // of all of them - versioning off, then the period - so they are inserted at
+        // the head in reverse order.
+        var dropPeriod = SqlRender.HasSystemTimePeriod(target) &&
+                         (periodMoved || !SqlRender.HasSystemTimePeriod(source));
+        if(dropPeriod)
+        {
+            pre.Insert(0, $"ALTER TABLE {SqlRender.TableIdentifier(source)} DROP PERIOD FOR SYSTEM_TIME;");
+            changes++;
+        }
+
+        if(turnOff)
+        {
+            pre.Insert(0, SqlRender.BuildSystemVersioningOff(source));
+            changes++;
+
+            if(!sourceVersioned)
+            {
+                warnings.Add($"-- WARNING: SYSTEM_VERSIONING is turned off; the history table " +
+                             $"[{target.HistoryTableSchema}].[{target.HistoryTableName}] stays behind as an ordinary " +
+                             "table and keeps the rows already in it.");
+            }
+        }
+
+        if(SqlRender.HasSystemTimePeriod(source) && (periodMoved || !SqlRender.HasSystemTimePeriod(target)))
+        {
+            // After the column adds, which is where the two GENERATED ALWAYS columns
+            // the period names come from.
+            post.Add($"ALTER TABLE {SqlRender.TableIdentifier(source)} " +
+                     $"ADD {SqlRender.BuildPeriodClause(source)};");
+            changes++;
+        }
+
+        if(turnOn)
+        {
+            post.Add(SqlRender.BuildSystemVersioningOn(source));
+            changes++;
+
+            if(SqlRender.HistoryTableIdentifier(source) is null)
+            {
+                warnings.Add("-- WARNING: SYSTEM_VERSIONING is turned on without naming a history table, so SQL Server " +
+                             "invents a name containing this table's object id — which differs on every database and " +
+                             "will read as drift. Name the history table on the source.");
+            }
+
+            if(historyMoved)
+            {
+                warnings.Add($"-- WARNING: the history table moves from [{target.HistoryTableSchema}].[{target.HistoryTableName}] " +
+                             $"to [{source.HistoryTableSchema}].[{source.HistoryTableName}]; the rows already recorded stay " +
+                             "in the old one, which is left behind as an ordinary table.");
+            }
+
+            if(columnsChange && targetVersioned)
+            {
+                warnings.Add("-- WARNING: columns are added or dropped while SYSTEM_VERSIONING is off, so the history " +
+                             "table is not carried along. Bring it to the same shape before the SET ... ON, or it will " +
+                             "fail with a column-count mismatch.");
+            }
+        }
+
+        return changes;
+    }
+
+    /// <summary>Compares two optional catalog names the way SQL Server compares identifiers.</summary>
+    private static bool NameEqual(string? a, string? b) =>
+        string.Equals(a ?? string.Empty, b ?? string.Empty, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Emits the statements that turn <paramref name="tgt"/> into <paramref name="src"/>.
@@ -208,6 +357,18 @@ public sealed class TableDiffer
         // Computed columns must be dropped and re-added.
         if(src.IsComputed || tgt.IsComputed)
         {
+            // ...which SQL Server refuses on a system-versioned table, with versioning
+            // on ("adding computed column while system-versioning is ON is not
+            // supported") and with it off as well, because the history table would
+            // then be a column short of the current one.
+            if(SqlRender.IsSystemVersioned(source))
+            {
+                warnings.Add($"-- WARNING: computed column [{src.Name}] cannot be added to or removed from a " +
+                             "system-versioned table; SQL Server refuses it with versioning on, and doing it with " +
+                             "versioning off leaves the history table a column short.");
+                rebuildReasons.Add($"computed column [{src.Name}] changes on a system-versioned table, which no ALTER can do");
+            }
+
             if(tgt.IsComputed && !string.IsNullOrWhiteSpace(tgt.DefaultName))
                 columnAlters.Add(SqlRender.BuildConstraintDrop(source, tgt.DefaultName));
             columnAlters.Add($"ALTER TABLE {tableId} DROP COLUMN {SqlRender.Quote(src.Name)};");
@@ -363,6 +524,12 @@ public sealed class TableDiffer
            DependsOnRewrittenColumn(tgt, x => x.Columns.Select(c => c.Name), rewrittenColumns))
             return false;
 
+        // Nothing on a memory-optimized table's index can be altered in place - not
+        // even its bucket count - because ALTER INDEX is rejected on one. The caller's
+        // drop and re-create, which goes through ALTER TABLE, is the only way.
+        if(table.IsMemoryOptimized)
+            return false;
+
         return AppendIndexOptionAlters(table, tgt.Name, src, tgt, isColumnstore: false, statements);
     }
 
@@ -384,6 +551,11 @@ public sealed class TableDiffer
     {
         if(!IndexShapeEqual(src, tgt) ||
            DependsOnRewrittenColumn(tgt, x => x.Columns.Select(c => c.Name), rewrittenColumns))
+            return false;
+
+        // See TryAlterKeyConstraintInPlace: ALTER INDEX is rejected on a
+        // memory-optimized table, whatever the option being changed.
+        if(table.IsMemoryOptimized)
             return false;
 
         if(src.IsDisabled && tgt.IsDisabled)
@@ -703,6 +875,8 @@ public sealed class TableDiffer
         a.IsPersisted == b.IsPersisted &&
         a.IsRowGuid == b.IsRowGuid &&
         a.IsSparse == b.IsSparse &&
+        a.GeneratedAlwaysType == b.GeneratedAlwaysType &&
+        a.IsHidden == b.IsHidden &&
         NormalizedEqual(a.DefaultDefinition ?? "", b.DefaultDefinition ?? "");
 
     private static bool KeyConstraintsEqual(KeyConstraintModel a, KeyConstraintModel b) =>
@@ -774,6 +948,7 @@ public sealed class TableDiffer
         a.IgnoreDupKey == b.IgnoreDupKey &&
         a.AllowRowLocks == b.AllowRowLocks &&
         a.AllowPageLocks == b.AllowPageLocks &&
+        a.BucketCount == b.BucketCount &&
         SqlRender.CompressionEqual(a.DataCompression, b.DataCompression);
 
     private static bool ColumnListEqual(List<IndexColumnModel> a, List<IndexColumnModel> b) =>
