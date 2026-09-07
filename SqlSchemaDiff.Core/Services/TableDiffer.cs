@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 using SqlSchemaDiff.Models;
 
@@ -138,7 +138,7 @@ public sealed class TableDiffer
         DiffNamed(
             source.CheckConstraints, target.CheckConstraints, CheckConstraintMatchKey,
             CheckConstraintsEqual,
-            add: s => AddCheckConstraint(source, s, post, warnings),
+            add: s => AddCheckConstraint(source, s, post),
             drop: t => pre.Add(SqlRender.BuildConstraintDrop(source, t.Name)),
             touches: x => ReferencedColumnNames(x.Definition, columnNames),
             rewrittenColumns, includeDrops, ref changeCount, warnings, "check constraint",
@@ -150,7 +150,7 @@ public sealed class TableDiffer
             Retain(target.ForeignKeys, handledForeignKeys),
             ForeignKeyMatchKey,
             ForeignKeysEqual,
-            add: s => AddForeignKey(source, s, post, warnings),
+            add: s => AddForeignKey(source, s, post),
             drop: t => pre.Add(SqlRender.BuildConstraintDrop(source, t.Name)),
             touches: x => x.Columns.Select(c => c.ParentColumn),
             rewrittenColumns, includeDrops, ref changeCount, warnings, "foreign key",
@@ -686,23 +686,25 @@ public sealed class TableDiffer
     /// Adds a check constraint and restores the disabled state its model carries.
     /// <c>ADD CONSTRAINT</c> always leaves a constraint enabled, exactly as CREATE
     /// TABLE does, so the NOCHECK afterwards is what
-    /// <see cref="SqlRender.BuildTableCreateScript"/> emits too.
+    /// <see cref="SqlRender.BuildTableCreateScript"/> emits too - including for a
+    /// server-named constraint, whose name on the target is resolved when the script
+    /// runs rather than guessed from the snapshot.
     /// </summary>
     private static void AddCheckConstraint(
-        TableModel table, CheckConstraintModel check, List<string> statements, List<string> warnings)
+        TableModel table, CheckConstraintModel check, List<string> statements)
     {
         statements.Add(SqlRender.BuildCheckConstraintAdd(table, check));
-        AppendDisableAfterAdd(table, check.Name, check.IsSystemNamed, check.IsDisabled,
-            "check constraint", statements, warnings);
+        if(check.IsDisabled)
+            statements.Add(SqlRender.BuildCheckConstraintNoCheck(table, check));
     }
 
     /// <summary>Adds a foreign key and restores its disabled state. See <see cref="AddCheckConstraint"/>.</summary>
     private static void AddForeignKey(
-        TableModel table, ForeignKeyModel foreignKey, List<string> statements, List<string> warnings)
+        TableModel table, ForeignKeyModel foreignKey, List<string> statements)
     {
         statements.Add(SqlRender.BuildForeignKeyAdd(table, foreignKey));
-        AppendDisableAfterAdd(table, foreignKey.Name, foreignKey.IsSystemNamed, foreignKey.IsDisabled,
-            "foreign key", statements, warnings);
+        if(foreignKey.IsDisabled)
+            statements.Add(SqlRender.BuildForeignKeyNoCheck(table, foreignKey));
     }
 
     /// <summary>Creates an index and puts it straight back to sleep if that is its state.</summary>
@@ -711,30 +713,6 @@ public sealed class TableDiffer
         statements.Add(SqlRender.BuildIndexCreate(table, index));
         if(index.IsDisabled)
             statements.Add(SqlRender.BuildIndexDisable(table, index));
-    }
-
-    /// <summary>
-    /// The <c>NOCHECK</c> that follows an <c>ADD CONSTRAINT</c> for a constraint that
-    /// is meant to be switched off - or a warning, when the constraint has no name of
-    /// its own to switch off by. A server-named constraint gets a fresh random name on
-    /// the target, which the script cannot know, and guessing one would disable
-    /// whatever else happened to answer to it.
-    /// </summary>
-    private static void AppendDisableAfterAdd(
-        TableModel table, string name, bool isSystemNamed, bool isDisabled, string label,
-        List<string> statements, List<string> warnings)
-    {
-        if(!isDisabled)
-            return;
-
-        if(isSystemNamed || string.IsNullOrWhiteSpace(name))
-        {
-            warnings.Add($"-- WARNING: {label} [{name}] is disabled on source but its name is server-generated, " +
-                         "so the one created here cannot be named and stays enabled.");
-            return;
-        }
-
-        statements.Add(SqlRender.BuildConstraintNoCheck(table, name));
     }
 
     /// <summary>

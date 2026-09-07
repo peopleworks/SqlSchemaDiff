@@ -402,6 +402,45 @@ public class ConstraintStateTests
         Assert.DoesNotContain("sys.check_constraints", script);
     }
 
+    /// <summary>
+    /// The fourth site of the same defect, and the one a user meets most often: not a
+    /// table created from scratch, but a constraint added to a table that is already
+    /// there. Until this was closed the incremental path printed a warning and left the
+    /// constraint enforcing - better than silence, still the wrong database.
+    /// </summary>
+    [Fact]
+    public void DisabledServerNamedConstraintAddedByAnIncrementalDiff_IsResolvedToo()
+    {
+        var target = Table("Invoice", Col("Id", nullable: false), Col("Qty", "int"));
+
+        var result = _differ.Diff(ServerNamedCheck(disabled: true), target, includeDrops: false);
+
+        AssertOrder(result.Script,
+            "ADD CHECK ([Qty]>(0));",
+            "FROM sys.check_constraints AS cc",
+            "SET @sql = N'ALTER TABLE [dbo].[Invoice] NOCHECK CONSTRAINT ' + QUOTENAME(@name);",
+            "EXEC sys.sp_executesql @sql;");
+
+        Assert.DoesNotContain("stays enabled", result.Script);
+        Assert.DoesNotContain("NOCHECK CONSTRAINT [CK__Invoice__Qty__1A2B3C4D]", result.Script);
+    }
+
+    [Fact]
+    public void DisabledServerNamedForeignKeyAddedByAnIncrementalDiff_IsResolvedToo()
+    {
+        var target = Table("Invoice", Col("Id", nullable: false), Col("CustomerId", "int"));
+
+        var result = _differ.Diff(ServerNamedForeignKey(disabled: true), target, includeDrops: false);
+
+        AssertOrder(result.Script,
+            "ADD FOREIGN KEY ([CustomerId])",
+            "FROM sys.foreign_keys AS fk",
+            "SET @sql = N'ALTER TABLE [dbo].[Invoice] NOCHECK CONSTRAINT ' + QUOTENAME(@name);",
+            "EXEC sys.sp_executesql @sql;");
+
+        Assert.DoesNotContain("stays enabled", result.Script);
+    }
+
     // ------------------------------------------------------------------ builders
 
     private static SqlSchemaDiff.Models.TableModel WithForeignKey(bool disabled, bool notTrusted)

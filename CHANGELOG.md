@@ -1,8 +1,74 @@
-# Changelog
+﻿# Changelog
 
 All notable changes to SQLDiff are recorded here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.7.0] - 2026-09-07
+
+### Added
+
+- **Synonyms.** A database that used them extracted without them, a from-scratch script
+  did not create them, and a drift report never mentioned one that had been added or
+  repointed. They now travel like sequences and table types: extracted from
+  `sys.synonyms`, filtered with `--include synonyms`, counted in the extract summary, and
+  written to a new `035_synonyms.sql` phase that comes before tables and modules, because
+  a view may be written against one. `base_object_name` is emitted exactly as the catalog
+  returns it — one to four parts, already bracket-quoted — so a synonym pointing at
+  another database, or at a linked server, survives a round trip untouched. There is no
+  `ALTER SYNONYM`, so a repointed one is dropped and created again; it holds no data, and
+  a module that names it does not block the drop, because the name is resolved at use.
+- **Temporal and memory-optimized tables are scripted, not just reported.** 1.6 captured
+  their flags into the snapshot and then emitted a plain `CREATE TABLE` with a notice —
+  a script that produced a *different database* and said so only in a line nobody reads.
+  A system-versioned table now carries its `GENERATED ALWAYS AS ROW START/END` columns,
+  its `HIDDEN` markers and its `PERIOD FOR SYSTEM_TIME`, and the
+  `SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = ...))` lands in the finalize phase —
+  after the primary key exists, which is what SQL Server insists on, and after the rows
+  have loaded. A history table in a schema of its own is created with it. A
+  memory-optimized table is written with `MEMORY_OPTIMIZED = ON`, its `DURABILITY`, and
+  every key and index inline, including a hash key with its `BUCKET_COUNT` — the only
+  shape SQL Server accepts, since `CREATE INDEX` is rejected on such a table. Turning
+  versioning on or off, moving the history table, and adding or dropping the period are
+  all diffed. Ordinary column changes are *not* wrapped in an off/on pair: SQL Server
+  propagates them into the history table by itself, and doing it with versioning off
+  leaves the history a column short and the `SET ... ON` failing.
+
+### Fixed
+
+- **A constraint that was disabled came back enabled, if its name was
+  server-generated.** `ALTER TABLE ... NOCHECK CONSTRAINT` needs a name, and a
+  system-named constraint gets a fresh random one on the target, so the composer and the
+  renderer skipped the statement — silently, leaving a constraint the source had switched
+  off enforcing on the target, and reported as drift on the next run. The script now
+  resolves the name where it will actually run: a check constraint by its parent and its
+  predicate, a foreign key by its parent, what it references and its column list. It
+  disables exactly one constraint or none, printing what it matched on when the match is
+  ambiguous rather than disabling the wrong object. Four sites carried the same defect —
+  the composer, the from-scratch renderer, the table rebuild and the incremental diff —
+  and all four are closed.
+- **A table rebuild dropped an inbound foreign key nobody had asked to drop.** Every
+  foreign key pointing at a table comes down so the rebuild's `DROP TABLE` can run.
+  Which ones go back up was decided by `--include-drops` alone, but `--include-drops` and
+  `--include-table-drops` are separate flags: with the first and not the second, the key's
+  owner table survives the diff and lost a constraint anyway. A target-only inbound key
+  now goes back up unless its owner is on the source — where that table's own diff
+  removes the key properly — or the owner is target-only and `--include-table-drops` takes
+  the whole table with it. The rebuild's header names the flag that decided each key.
+
+### Known limits
+
+- A system-versioned or memory-optimized table cannot yet be **rebuilt**. Where 1.6 would
+  have emitted a `DROP` that fails at run time, the differ now refuses the plan and says
+  why. Doing it properly means turning versioning off around the drop, and building the
+  shadow table with its keys and indexes inline for a memory-optimized one.
+- A view written against a synonym records no dependency edge:
+  `sys.sql_expression_dependencies` is filtered by referenced object type and `SN` is not
+  in the list. Nothing is mis-ordered by it — synonyms are created before tables and
+  modules either way — but a future "referenced by" report would miss it.
+- Two identically-shaped, server-named, disabled check constraints on one table resolve
+  as ambiguous and both stay enabled, with a warning printed. The alternative was
+  guessing.
 
 ## [1.6.0] - 2026-09-02
 
@@ -285,6 +351,9 @@ Initial release.
 - Connection verification (`check-conn`).
 - Drift detection (`drift`) with exit code 2.
 
+[1.7.0]: https://github.com/peopleworks/SqlSchemaDiff/releases/tag/v1.7.0
+[1.6.0]: https://github.com/peopleworks/SqlSchemaDiff/releases/tag/v1.6.0
+[1.5.0]: https://github.com/peopleworks/SqlSchemaDiff/releases/tag/v1.5.0
 [1.4.0]: https://github.com/peopleworks/SqlSchemaDiff/releases/tag/v1.4.0
 [1.3.0]: https://github.com/peopleworks/SqlSchemaDiff/releases/tag/v1.3.0
 [1.2.0]: https://github.com/peopleworks/SqlSchemaDiff/releases/tag/v1.2.0

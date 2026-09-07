@@ -295,19 +295,20 @@ script it writes is a report; do not pipe it into `apply` without reading it.
 
 | Supported | Not yet |
 |---|---|
-| Tables, columns, identity, computed & persisted columns, collation, defaults, `SPARSE` | Synonyms, CLR types, assemblies |
+| Tables, columns, identity, computed & persisted columns, collation, defaults, `SPARSE` | CLR types, assemblies |
 | Primary keys, unique constraints, check constraints, foreign keys, with their disabled and untrusted state | Extended properties, permissions, users and roles |
-| Indexes: clustered, nonclustered, unique, filtered, `INCLUDE`, `DESC`, columnstore, with fill factor, padding, lock and compression options | XML, spatial and hash indexes *(reported, not scripted)* |
+| Indexes: clustered, nonclustered, unique, filtered, `INCLUDE`, `DESC`, columnstore, hash, with fill factor, padding, lock and compression options | XML and spatial indexes *(reported, not scripted)* |
 | Views, stored procedures, scalar and table-valued functions, DML triggers | Partition schemes and functions, filegroups |
-| Sequences, user-defined table types, alias types, schemas with their owner | Temporal `SYSTEM_VERSIONING` and memory-optimized tables *(captured and reported, not scripted)* |
-| System-named constraints, matched by shape rather than by name | |
+| Sequences, user-defined table types, alias types, synonyms, schemas with their owner | Rebuilding a system-versioned or memory-optimized table *(refused, with the reason, rather than a `DROP` that fails)* |
+| Temporal tables with their `PERIOD`, their history table and `SYSTEM_VERSIONING`; memory-optimized tables with `DURABILITY` and their inline keys and indexes | |
+| System-named constraints, matched by shape rather than by name, and switched off by the name the server gives them | |
 
 Anything in the right-hand column is skipped rather than mangled, and the ones that could
 matter for correctness are **reported on the console** rather than dropped silently:
 
 ```console
-  NOTE: [dbo].[Employee] is system-versioned; the SYSTEM_VERSIONING clause is not scripted
-  NOTE: skipped [dbo].[EmployeeHistory]: temporal history table (managed by SQL Server)
+  NOTE: skipped [dbo].[EmployeeHistory]: history table of a system-versioned table, which SQL Server creates from the SYSTEM_VERSIONING clause
+  NOTE: [dbo].[Session] is memory-optimized; the target database must already have a filegroup CONTAINS MEMORY_OPTIMIZED_DATA, which cannot be scripted
 ```
 
 **Column order is not drift.** Tables are compared structurally — columns, constraints and
@@ -500,7 +501,9 @@ warning comment, and you apply it twice or split it by hand.
 - [x] Triggers, sequences and table types
 - [x] A full script in dependency order, split into the phases a restore runs
 - [x] Live tests against a real SQL Server, in CI and locally
-- [ ] Synonyms
+- [x] Synonyms
+- [x] Temporal and memory-optimized tables scripted, not just reported
+- [ ] Rebuilding a temporal or memory-optimized table around its rows
 - [ ] Extended properties
 - [ ] Property-level ignore rules (ignore collation, fill factor, and similar)
 - [ ] `--report` mode: a readable HTML diff alongside the script
