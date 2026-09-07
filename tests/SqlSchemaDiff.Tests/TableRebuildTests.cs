@@ -264,6 +264,108 @@ public class TableRebuildTests
         Assert.Equal(0, Occurrences(result.Script, "ADD CONSTRAINT [FK_Shipment_Orders]"));
     }
 
+    /// <summary>
+    /// <c>--include-drops</c> and <c>--include-table-drops</c> are separate flags, and
+    /// the key's fate hangs on the second one. Its owning table exists only on the
+    /// target, and without table drops the differ keeps that table and says so in as
+    /// many words - so taking one of its foreign keys away is removing something nobody
+    /// asked to remove. 1.6 did exactly that: it read --include-drops as the whole
+    /// answer, and the next diff reported the missing key as drift.
+    /// </summary>
+    [Fact]
+    public void TargetOnlyInboundForeignKey_IsPutBackWhenItsOwnerTableIsNotBeingDropped()
+    {
+        var result = Diff(SourceWithoutShipment(), TargetSnapshot(), allowTableRebuild: true,
+            includeDrops: true, includeTableDrops: false);
+
+        Assert.Contains("ALTER TABLE [dbo].[Shipment] DROP CONSTRAINT [FK_Shipment_Orders];", result.Script);
+        Assert.Equal(1, Occurrences(result.Script, "ADD CONSTRAINT [FK_Shipment_Orders]"));
+
+        // The header names the flag that decided it, and the differ says the same thing
+        // about the table the key stands on.
+        Assert.Contains("FK_Shipment_Orders is put back", result.Script);
+        Assert.Contains("--include-table-drops was not given", result.Script);
+        Assert.Contains("table exists only on target and was not dropped: [dbo].[Shipment]", result.Script);
+    }
+
+    [Fact]
+    public void TargetOnlyInboundForeignKey_StaysDownWhenItsOwnerTableIsBeingDropped()
+    {
+        var result = Diff(SourceWithoutShipment(), TargetSnapshot(), allowTableRebuild: true,
+            includeDrops: true, includeTableDrops: true);
+
+        Assert.Equal(0, Occurrences(result.Script, "ADD CONSTRAINT [FK_Shipment_Orders]"));
+        Assert.Contains("FK_Shipment_Orders stays down", result.Script);
+        Assert.Contains("--include-table-drops drops that table", result.Script);
+        Assert.Contains("DROP TABLE [dbo].[Shipment]", result.Script);
+    }
+
+    /// <summary>
+    /// The other side of it: the owning table is on the source without this key, so its
+    /// own diff would have dropped the key anyway and the rebuild leaving it down is
+    /// that same decision reached earlier. --include-table-drops has nothing to say
+    /// about a table nobody is dropping.
+    /// </summary>
+    [Fact]
+    public void TargetOnlyInboundForeignKeyOnATableTheSourceHas_StaysDownWithoutTableDropsToo()
+    {
+        var result = Diff(SourceSnapshot(withInboundForeignKey: false), TargetSnapshot(), allowTableRebuild: true,
+            includeDrops: true, includeTableDrops: false);
+
+        Assert.Equal(0, Occurrences(result.Script, "ADD CONSTRAINT [FK_Shipment_Orders]"));
+        Assert.Contains("FK_Shipment_Orders stays down", result.Script);
+        Assert.Contains("[dbo].[Shipment] is on the source without it", result.Script);
+    }
+
+    // ------------------------------------ constraints the server named for itself
+
+    /// <summary>
+    /// The rebuild re-creates the table's checks from scratch, so a disabled one has to
+    /// be switched off again afterwards - and one SQL Server named has a different name
+    /// on the other side of the rebuild than it had in the snapshot. Resolving it is the
+    /// only way the state survives.
+    /// </summary>
+    [Fact]
+    public void DisabledServerNamedCheckOnARebuiltTable_IsSwitchedOffByItsResolvedName()
+    {
+        var source = SourceSnapshot();
+        var check = source.Objects.Single(x => x.Name == "Orders").Table!.CheckConstraints[0];
+        check.IsSystemNamed = true;
+        check.IsDisabled = true;
+
+        var result = Diff(source, TargetSnapshot(), allowTableRebuild: true);
+
+        AssertOrder(result.Script,
+            "ALTER TABLE [dbo].[Orders] WITH CHECK ADD CHECK ([Total]>=(0));",
+            "FROM sys.check_constraints AS cc",
+            "SET @sql = N'ALTER TABLE [dbo].[Orders] NOCHECK CONSTRAINT ' + QUOTENAME(@name);",
+            "EXEC sys.sp_executesql @sql;");
+        Assert.DoesNotContain("NOCHECK CONSTRAINT [CK_Orders_Total]", result.Script);
+    }
+
+    /// <summary>The same for a key pointing at the rebuilt table, which the rebuild puts back itself.</summary>
+    [Fact]
+    public void DisabledServerNamedInboundForeignKey_IsSwitchedOffByItsResolvedName()
+    {
+        var source = SourceSnapshot();
+        var target = TargetSnapshot();
+        foreach(var snapshot in new[] { source, target })
+        {
+            var foreignKey = snapshot.Objects.Single(x => x.Name == "Shipment").Table!.ForeignKeys[0];
+            foreignKey.IsSystemNamed = true;
+            foreignKey.IsDisabled = true;
+        }
+
+        var result = Diff(source, target, allowTableRebuild: true);
+
+        AssertOrder(result.Script,
+            "ALTER TABLE [dbo].[Shipment] WITH CHECK ADD FOREIGN KEY ([OrderId])",
+            "FROM sys.foreign_keys AS fk",
+            "SET @sql = N'ALTER TABLE [dbo].[Shipment] NOCHECK CONSTRAINT ' + QUOTENAME(@name);",
+            "EXEC sys.sp_executesql @sql;");
+        Assert.DoesNotContain("NOCHECK CONSTRAINT [FK_Shipment_Orders]", result.Script);
+    }
+
     // ----------------------------------------------------------------- ordering
 
     /// <summary>
@@ -354,8 +456,14 @@ public class TableRebuildTests
 
     // ------------------------------------------------------------------ fixtures
 
-    private DiffResult Diff(DatabaseSnapshot source, DatabaseSnapshot target, bool allowTableRebuild, bool includeDrops = false) =>
-        _differ.Diff(source, target, includeDrops, includeTableDrops: includeDrops, allowTableRebuild, addOnly: false);
+    /// <summary>
+    /// A diff with the two drop flags moving together unless a test says otherwise -
+    /// which most of them do not, and the ones that do are about exactly that.
+    /// </summary>
+    private DiffResult Diff(
+        DatabaseSnapshot source, DatabaseSnapshot target, bool allowTableRebuild,
+        bool includeDrops = false, bool? includeTableDrops = null) =>
+        _differ.Diff(source, target, includeDrops, includeTableDrops ?? includeDrops, allowTableRebuild, addOnly: false);
 
     /// <summary>
     /// A table with one of everything the rebuild has to carry: an identity, a named
@@ -402,6 +510,20 @@ public class TableRebuildTests
             TableObject(orders, SqlRender.BuildTableCreateScript(orders)),
             TableObject(shipment, SqlRender.BuildTableCreateScript(shipment)),
             TriggerObject("trOrders", "dbo", "Orders", triggerDisabled));
+    }
+
+    /// <summary>
+    /// The source with no [dbo].[Shipment] in it at all, so the table pointing at
+    /// [dbo].[Orders] exists only on the target - which is what makes
+    /// --include-table-drops, rather than --include-drops, the flag that decides its
+    /// fate and the fate of its foreign key.
+    /// </summary>
+    private static DatabaseSnapshot SourceWithoutShipment()
+    {
+        var orders = Orders(identity: true);
+        return Snapshot("Src",
+            TableObject(orders, SqlRender.BuildTableCreateScript(orders)),
+            TriggerObject("trOrders", "dbo", "Orders"));
     }
 
     private static DatabaseSnapshot TargetSnapshot(bool withInboundForeignKey = true)

@@ -34,7 +34,8 @@ public sealed class SchemaDiffer
         // because a rebuild reaches outside its own table: it drops the foreign keys
         // pointing at it and re-creates the triggers on it, and the objects on the
         // other end of that have to know not to do the same work again.
-        var rebuilds = PlanRebuilds(source, target, targetByKey, includeDrops, allowTableRebuild, tableDiffer);
+        var rebuilds = PlanRebuilds(
+            source, target, targetByKey, includeDrops, includeTableDrops, allowTableRebuild, tableDiffer);
 
         foreach(var sourceObject in source.Objects.OrderBy(GetCreateOrder).ThenBy(x => x.Key, StringComparer.OrdinalIgnoreCase))
         {
@@ -289,6 +290,7 @@ public sealed class SchemaDiffer
         DatabaseSnapshot target,
         Dictionary<string, DbSchemaObject> targetByKey,
         bool includeDrops,
+        bool includeTableDrops,
         bool allowTableRebuild,
         TableDiffer tableDiffer)
     {
@@ -325,7 +327,8 @@ public sealed class SchemaDiffer
             }
 
             plan.Add(sourceObject.Key, TableRebuilder.Build(
-                sourceObject.Table!, targetObject.Table, source, target, reasons, includeDrops));
+                sourceObject.Table!, targetObject.Table, source, target, reasons,
+                includeDrops, includeTableDrops));
         }
 
         return plan;

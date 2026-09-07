@@ -277,6 +277,131 @@ public class ConstraintStateTests
         Assert.DoesNotContain("CK_Invoice_Kind", result.Script);
     }
 
+    // --------------------------------------- names the server made up for itself
+
+    /// <summary>
+    /// A constraint SQL Server named carries a per-database random suffix, so the name
+    /// in the snapshot belongs to the machine it was read from. Naming it in a
+    /// <c>NOCHECK</c> on the target either fails or hits whatever else answers to it -
+    /// which is why until 1.7 the renderers emitted nothing at all. The cost of that
+    /// was silent: a constraint the source had switched off came back enforcing, and
+    /// the script did not mention it. The name is now resolved on the server instead.
+    /// </summary>
+    [Fact]
+    public void DisabledServerNamedCheck_IsAddedAndThenDisabledByTheNameTheServerGave()
+    {
+        var script = ScriptComposer.ComposeFullScript(Snapshot("Db", TableObject(ServerNamedCheck(disabled: true))));
+
+        AssertOrder(script,
+            "ALTER TABLE [dbo].[Invoice] WITH CHECK ADD CHECK ([Qty]>(0));",
+            "SELECT @matches = COUNT(*), @name = MIN(cc.name)",
+            "WHERE cc.parent_object_id = OBJECT_ID(N'[dbo].[Invoice]')",
+            "AND cc.is_system_named = 1",
+            "IF @matches = 1",
+            "SET @sql = N'ALTER TABLE [dbo].[Invoice] NOCHECK CONSTRAINT ' + QUOTENAME(@name);",
+            "EXEC sys.sp_executesql @sql;");
+
+        // Never by the name it answered to on the machine it was read from.
+        Assert.DoesNotContain("NOCHECK CONSTRAINT [CK__Invoice__Qty__1A2B3C4D]", script);
+    }
+
+    [Fact]
+    public void DisabledServerNamedForeignKey_IsAddedAndThenDisabledByTheNameTheServerGave()
+    {
+        var script = ScriptComposer.ComposeFullScript(
+            Snapshot("Db", TableObject(ServerNamedForeignKey(disabled: true))));
+
+        AssertOrder(script,
+            "ALTER TABLE [dbo].[Invoice] WITH CHECK ADD FOREIGN KEY ([CustomerId]) REFERENCES [dbo].[Customer] ([Id]);",
+            "SELECT @matches = COUNT(*), @name = MIN(fk.name)",
+            "WHERE fk.parent_object_id = OBJECT_ID(N'[dbo].[Invoice]')",
+            "AND fk.referenced_object_id = OBJECT_ID(N'[dbo].[Customer]')",
+            "FROM (VALUES (1, N'CustomerId', N'Id'))",
+            "IF @matches = 1",
+            "SET @sql = N'ALTER TABLE [dbo].[Invoice] NOCHECK CONSTRAINT ' + QUOTENAME(@name);",
+            "EXEC sys.sp_executesql @sql;");
+
+        Assert.DoesNotContain("NOCHECK CONSTRAINT [FK__Invoice__Custom__2B3C4D5E]", script);
+    }
+
+    /// <summary>
+    /// <see cref="SqlRender.BuildTableCreateScript"/> is the other renderer with the
+    /// same job - it is what a snapshot stores as a table's definition, and so what the
+    /// differ emits for a table the target does not have at all.
+    /// </summary>
+    [Fact]
+    public void DisabledServerNamedConstraints_AreResolvedInTheStandaloneCreateScriptToo()
+    {
+        AssertOrder(SqlRender.BuildTableCreateScript(ServerNamedCheck(disabled: true)),
+            "ADD CHECK ([Qty]>(0));",
+            "FROM sys.check_constraints AS cc",
+            "SET @sql = N'ALTER TABLE [dbo].[Invoice] NOCHECK CONSTRAINT ' + QUOTENAME(@name);",
+            "EXEC sys.sp_executesql @sql;");
+
+        AssertOrder(SqlRender.BuildTableCreateScript(ServerNamedForeignKey(disabled: true)),
+            "ADD FOREIGN KEY ([CustomerId])",
+            "FROM sys.foreign_keys AS fk",
+            "SET @sql = N'ALTER TABLE [dbo].[Invoice] NOCHECK CONSTRAINT ' + QUOTENAME(@name);",
+            "EXEC sys.sp_executesql @sql;");
+    }
+
+    /// <summary>
+    /// The lookup is only allowed to act on a single answer. Two constraints of the
+    /// same shape, or none, and it does nothing and says so at run time: disabling the
+    /// wrong constraint is worse than leaving one enabled and complaining about it.
+    /// </summary>
+    [Fact]
+    public void ResolvedDisable_DoesNothingUnlessItMatchesExactlyOneConstraint()
+    {
+        var script = ScriptComposer.ComposeFullScript(Snapshot("Db", TableObject(ServerNamedCheck(disabled: true))));
+
+        AssertOrder(script,
+            "IF @matches = 1",
+            "SET @sql = N'ALTER TABLE [dbo].[Invoice] NOCHECK CONSTRAINT ' + QUOTENAME(@name);",
+            "EXEC sys.sp_executesql @sql;",
+            "ELSE",
+            "PRINT N'-- WARNING: the CHECK constraint on [dbo].[Invoice] matched on '",
+            "+ N' constraint(s), not one, so it was left enabled.';");
+    }
+
+    /// <summary>
+    /// An enabled constraint has nothing to switch off, server-named or not. Emitting
+    /// the lookup anyway would be a batch that reads as if something were wrong.
+    /// </summary>
+    [Fact]
+    public void EnabledServerNamedConstraints_ProduceNoDisableAtAll()
+    {
+        var check = ScriptComposer.ComposeFullScript(Snapshot("Db", TableObject(ServerNamedCheck(disabled: false))));
+        var foreignKey = ScriptComposer.ComposeFullScript(
+            Snapshot("Db", TableObject(ServerNamedForeignKey(disabled: false))));
+
+        Assert.Contains("ADD CHECK ([Qty]>(0));", check);
+        Assert.Contains("ADD FOREIGN KEY ([CustomerId])", foreignKey);
+
+        foreach(var script in new[] { check, foreignKey })
+        {
+            Assert.DoesNotContain("NOCHECK CONSTRAINT", script);
+            Assert.DoesNotContain("sys.check_constraints", script);
+            Assert.DoesNotContain("sys.foreign_keys", script);
+            Assert.DoesNotContain("@matches", script);
+        }
+    }
+
+    /// <summary>
+    /// A constraint with a name of its own is still switched off by that name: it is
+    /// stable across databases, and one ALTER reads better than fifteen lines of
+    /// catalog lookup.
+    /// </summary>
+    [Fact]
+    public void DisabledConstraintWithANameOfItsOwn_IsStillSwitchedOffByThatName()
+    {
+        var script = ScriptComposer.ComposeFullScript(
+            Snapshot("Db", TableObject(WithCheck(disabled: true, notTrusted: false))));
+
+        Assert.Contains("ALTER TABLE [dbo].[Invoice] NOCHECK CONSTRAINT [CK_Invoice_Qty];", script);
+        Assert.DoesNotContain("sys.check_constraints", script);
+    }
+
     // ------------------------------------------------------------------ builders
 
     private static SqlSchemaDiff.Models.TableModel WithForeignKey(bool disabled, bool notTrusted)
@@ -297,6 +422,48 @@ public class ConstraintStateTests
         check.IsNotTrusted = notTrusted;
         table.CheckConstraints.Add(check);
         return table;
+    }
+
+    /// <summary>The check constraint of <see cref="WithCheck"/>, named by the server.</summary>
+    private static SqlSchemaDiff.Models.TableModel ServerNamedCheck(bool disabled)
+    {
+        var table = Table("Invoice", Col("Id", nullable: false), Col("Qty", "int"));
+        var check = Check("CK__Invoice__Qty__1A2B3C4D", "([Qty]>(0))");
+        check.IsSystemNamed = true;
+        check.IsDisabled = disabled;
+        table.CheckConstraints.Add(check);
+        return table;
+    }
+
+    /// <summary>The foreign key of <see cref="WithForeignKey"/>, named by the server.</summary>
+    private static SqlSchemaDiff.Models.TableModel ServerNamedForeignKey(bool disabled)
+    {
+        var table = Table("Invoice", Col("Id", nullable: false), Col("CustomerId", "int"));
+        var foreignKey = ForeignKey("FK__Invoice__Custom__2B3C4D5E", "Customer", "CustomerId");
+        foreignKey.IsSystemNamed = true;
+        foreignKey.IsDisabled = disabled;
+        table.ForeignKeys.Add(foreignKey);
+        return table;
+    }
+
+    /// <summary>
+    /// Asserts the fragments appear, and appear in this order. The order is the point
+    /// for a resolved disable: an ADD that lands after the lookup that is meant to find
+    /// what it created disables nothing.
+    /// </summary>
+    private static void AssertOrder(string script, params string[] fragments)
+    {
+        var previous = -1;
+        var previousFragment = string.Empty;
+        foreach(var fragment in fragments)
+        {
+            var index = script.IndexOf(fragment, StringComparison.Ordinal);
+            Assert.True(index >= 0, $"the script never says \"{fragment}\":{Environment.NewLine}{script}");
+            Assert.True(index > previous,
+                $"\"{fragment}\" comes before \"{previousFragment}\" and should not:{Environment.NewLine}{script}");
+            previous = index;
+            previousFragment = fragment;
+        }
     }
 
     private static SqlSchemaDiff.Models.TableModel WithIndex(bool disabled)
