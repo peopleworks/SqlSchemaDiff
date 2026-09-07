@@ -492,6 +492,161 @@ public static class SqlRender
     public static string BuildConstraintNoCheck(TableModel table, string name) =>
         $"ALTER TABLE {TableIdentifier(table)} NOCHECK CONSTRAINT {Quote(name)};";
 
+    /// <summary>
+    /// The <c>NOCHECK</c> that belongs after the <c>ADD</c> for a check constraint the
+    /// source had switched off.
+    /// <para>
+    /// A constraint the caller named is switched off by that name. One SQL Server named
+    /// for itself cannot be: the <c>CK__Widget__Price__1A2B3C4D</c> in the snapshot
+    /// belongs to the server it was read from, and the <c>ADD</c> above has just been
+    /// handed a fresh one of its own. Naming the old one fails, or - worse - finds
+    /// something else that happens to answer to it. Until 1.7 the renderers gave up at
+    /// that point and emitted nothing, which left the constraint enforcing on a target
+    /// whose source had it off, and said nothing about it.
+    /// </para>
+    /// <para>
+    /// So the name is resolved on the server, at the moment the script runs, from the
+    /// two things that do carry across: the table the constraint stands on and the
+    /// predicate it enforces. Exactly one match is disabled; none or several is left
+    /// alone and printed, because disabling the wrong constraint is worse than
+    /// disabling nothing.
+    /// </para>
+    /// </summary>
+    public static string BuildCheckConstraintNoCheck(TableModel table, CheckConstraintModel check) =>
+        IsServerNamed(check.Name, check.IsSystemNamed)
+            ? BuildResolvedNoCheck(
+                table,
+                "CHECK constraint",
+                $"the predicate {Collapse(check.Definition)}",
+                BuildCheckConstraintLookup(table, check))
+            : BuildConstraintNoCheck(table, check.Name);
+
+    /// <summary>
+    /// The <c>NOCHECK</c> that belongs after the <c>ADD</c> for a foreign key the source
+    /// had switched off. Same problem and same answer as
+    /// <see cref="BuildCheckConstraintNoCheck"/>; a foreign key is matched on the table
+    /// it sits on, the table it points at, and its column pairs in order.
+    /// </summary>
+    public static string BuildForeignKeyNoCheck(TableModel table, ForeignKeyModel foreignKey) =>
+        IsServerNamed(foreignKey.Name, foreignKey.IsSystemNamed)
+            ? BuildResolvedNoCheck(
+                table,
+                "FOREIGN KEY",
+                $"the reference to {Quote(foreignKey.ReferencedSchema, foreignKey.ReferencedTable)} " +
+                $"on ({string.Join(", ", foreignKey.Columns.Select(x => Quote(x.ParentColumn)))})",
+                BuildForeignKeyLookup(table, foreignKey))
+            : BuildConstraintNoCheck(table, foreignKey.Name);
+
+    /// <summary>
+    /// True when the script cannot put a name in a <c>NOCHECK CONSTRAINT</c> clause and
+    /// expect it to mean anything on the target. A missing name counts: a model that
+    /// carries none is in the same position as one whose name the server invented.
+    /// </summary>
+    private static bool IsServerNamed(string? name, bool isSystemNamed) =>
+        isSystemNamed || string.IsNullOrWhiteSpace(name);
+
+    /// <summary>
+    /// The batch that resolves a server-generated name and switches that one constraint
+    /// off. <paramref name="matchedOn"/> is what the lookup keys on, said in English,
+    /// because it is the first thing a reviewer wants to know and the last thing the run
+    /// says when the lookup comes to nothing.
+    /// </summary>
+    private static string BuildResolvedNoCheck(TableModel table, string kind, string matchedOn, string lookup)
+    {
+        var tableId = TableIdentifier(table);
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"-- The {kind} added above was disabled on the source and SQL Server had named");
+        sb.AppendLine("-- it, so the name it carried there is not the name it has here. Find the one");
+        sb.AppendLine($"-- this script just created on {tableId} by {matchedOn},");
+        sb.AppendLine("-- and switch that one off. Nothing is disabled unless the lookup comes to");
+        sb.AppendLine("-- exactly one constraint.");
+        sb.AppendLine("DECLARE @name sysname, @matches int, @sql nvarchar(max);");
+        sb.AppendLine();
+        sb.AppendLine(lookup);
+        sb.AppendLine();
+        sb.AppendLine("IF @matches = 1");
+        sb.AppendLine("BEGIN");
+
+        // EXEC() takes variables and string literals and nothing else, so QUOTENAME
+        // cannot go inside it: the resolved name is quoted into a variable first.
+        sb.AppendLine($"    SET @sql = N'ALTER TABLE {Literal(tableId)} NOCHECK CONSTRAINT ' + QUOTENAME(@name);");
+        sb.AppendLine("    EXEC sys.sp_executesql @sql;");
+        sb.AppendLine("END");
+        sb.AppendLine("ELSE");
+        sb.AppendLine($"    PRINT N'-- WARNING: the {Literal(kind)} on {Literal(tableId)} matched on '");
+        sb.AppendLine($"        + N'{Literal(matchedOn)} came to ' + CAST(@matches AS nvarchar(12))");
+        sb.Append("        + N' constraint(s), not one, so it was left enabled.';");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Finds a server-named check constraint on the table by its predicate. The
+    /// comparison ignores whitespace on both sides: SQL Server rewrites an expression
+    /// from its own parse tree, and a snapshot that was hand-written or produced by an
+    /// older extractor need not have spaced it the same way.
+    /// </summary>
+    private static string BuildCheckConstraintLookup(TableModel table, CheckConstraintModel check)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("SELECT @matches = COUNT(*), @name = MIN(cc.name)");
+        sb.AppendLine("FROM sys.check_constraints AS cc");
+        sb.AppendLine($"WHERE cc.parent_object_id = OBJECT_ID(N'{Literal(TableIdentifier(table))}')");
+        sb.AppendLine("  AND cc.is_system_named = 1");
+        sb.AppendLine($"  AND {Unspaced("cc.definition")} =");
+        sb.Append($"      {Unspaced($"N'{Literal(check.Definition)}'")};");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Finds a server-named foreign key on the table by what it points at and the column
+    /// pairs it points with. The count and the <c>EXCEPT</c> together are an equality:
+    /// the key has as many columns as the source's, and not one pair the source does not
+    /// have.
+    /// </summary>
+    private static string BuildForeignKeyLookup(TableModel table, ForeignKeyModel foreignKey)
+    {
+        var expected = foreignKey.Columns
+            .Select((x, i) => $"({i + 1}, N'{Literal(x.ParentColumn)}', N'{Literal(x.ReferencedColumn)}')");
+
+        var sb = new StringBuilder();
+        sb.AppendLine("SELECT @matches = COUNT(*), @name = MIN(fk.name)");
+        sb.AppendLine("FROM sys.foreign_keys AS fk");
+        sb.AppendLine($"WHERE fk.parent_object_id = OBJECT_ID(N'{Literal(TableIdentifier(table))}')");
+        sb.AppendLine("  AND fk.referenced_object_id = " +
+                      $"OBJECT_ID(N'{Literal(Quote(foreignKey.ReferencedSchema, foreignKey.ReferencedTable))}')");
+        sb.AppendLine("  AND fk.is_system_named = 1");
+        sb.AppendLine("  AND (SELECT COUNT(*) FROM sys.foreign_key_columns AS c");
+        sb.AppendLine($"       WHERE c.constraint_object_id = fk.object_id) = {foreignKey.Columns.Count}");
+        sb.AppendLine("  AND NOT EXISTS");
+        sb.AppendLine("      (");
+        sb.AppendLine("          SELECT fkc.constraint_column_id, pc.name AS parent_column, rc.name AS referenced_column");
+        sb.AppendLine("          FROM sys.foreign_key_columns AS fkc");
+        sb.AppendLine("          INNER JOIN sys.columns AS pc ON pc.object_id = fkc.parent_object_id");
+        sb.AppendLine("                                      AND pc.column_id = fkc.parent_column_id");
+        sb.AppendLine("          INNER JOIN sys.columns AS rc ON rc.object_id = fkc.referenced_object_id");
+        sb.AppendLine("                                      AND rc.column_id = fkc.referenced_column_id");
+        sb.AppendLine("          WHERE fkc.constraint_object_id = fk.object_id");
+        sb.AppendLine("          EXCEPT");
+        sb.AppendLine("          SELECT *");
+        sb.AppendLine($"          FROM (VALUES {string.Join(", ", expected)})");
+        sb.AppendLine("               AS expected (constraint_column_id, parent_column, referenced_column)");
+        sb.Append("      );");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// A T-SQL expression with every space, tab and line break taken out of
+    /// <paramref name="expression"/>, so two spellings of the same predicate compare
+    /// equal.
+    /// </summary>
+    private static string Unspaced(string expression) =>
+        $"REPLACE(REPLACE(REPLACE(REPLACE({expression}, NCHAR(13), N''), NCHAR(10), N''), NCHAR(9), N''), N' ', N'')";
+
+    /// <summary>One line of whatever came in, for a comment or a PRINT.</summary>
+    private static string Collapse(string text) =>
+        string.Join(" ", text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
     public static string BuildIndexDisable(TableModel table, IndexModel index) =>
         $"ALTER INDEX {Quote(index.Name)} ON {TableIdentifier(table)} DISABLE;";
 
@@ -588,9 +743,9 @@ public static class SqlRender
             sb.AppendLine(BuildForeignKeyAdd(table, foreignKey));
             sb.AppendLine("GO");
 
-            if(foreignKey.IsDisabled && !foreignKey.IsSystemNamed)
+            if(foreignKey.IsDisabled)
             {
-                sb.AppendLine(BuildConstraintNoCheck(table, foreignKey.Name));
+                sb.AppendLine(BuildForeignKeyNoCheck(table, foreignKey));
                 sb.AppendLine("GO");
             }
 
@@ -602,9 +757,9 @@ public static class SqlRender
             sb.AppendLine(BuildCheckConstraintAdd(table, check));
             sb.AppendLine("GO");
 
-            if(check.IsDisabled && !check.IsSystemNamed)
+            if(check.IsDisabled)
             {
-                sb.AppendLine(BuildConstraintNoCheck(table, check.Name));
+                sb.AppendLine(BuildCheckConstraintNoCheck(table, check));
                 sb.AppendLine("GO");
             }
 

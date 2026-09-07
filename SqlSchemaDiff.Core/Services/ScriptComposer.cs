@@ -273,12 +273,12 @@ public static class ScriptComposer
                 Retryable = true
             });
 
-            if(check.IsDisabled && !check.IsSystemNamed)
+            if(check.IsDisabled)
             {
                 add(checkPhase, new ScriptBatch
                 {
                     Describe = Describe("Disable check constraint", check.Name, check.IsSystemNamed, identifier),
-                    Sql = SqlRender.BuildConstraintNoCheck(table, check.Name)
+                    Sql = SqlRender.BuildCheckConstraintNoCheck(table, check)
                 });
             }
         }
@@ -309,12 +309,12 @@ public static class ScriptComposer
                 Sql = SqlRender.BuildForeignKeyAdd(table, foreignKey)
             });
 
-            if(foreignKey.IsDisabled && !foreignKey.IsSystemNamed)
+            if(foreignKey.IsDisabled)
             {
                 add(PhaseId.ForeignKeys, new ScriptBatch
                 {
                     Describe = Describe("Disable foreign key", foreignKey.Name, foreignKey.IsSystemNamed, identifier),
-                    Sql = SqlRender.BuildConstraintNoCheck(table, foreignKey.Name)
+                    Sql = SqlRender.BuildForeignKeyNoCheck(table, foreignKey)
                 });
             }
         }

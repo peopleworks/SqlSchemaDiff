@@ -1,3 +1,4 @@
+using Microsoft.Data.SqlClient;
 using SqlSchemaDiff.Models;
 using SqlSchemaDiff.Services;
 
@@ -174,6 +175,176 @@ public sealed class TableRebuildLiveTests
 
         Snapshots.AssertNoChanges("after the state changes", Compare(source, target));
         Snapshots.AssertNoChanges("after the state changes (reversed)", Compare(target, source));
+    }
+
+    /// <summary>
+    /// The test this work package exists for. A check constraint and a foreign key that
+    /// SQL Server named for itself, both switched off, read out of one database and
+    /// written back into another as a from-scratch script.
+    /// <para>
+    /// Every renderer before 1.7 dropped the <c>NOCHECK</c> on the floor here: the only
+    /// name it had was the one the other server invented, which means nothing on this
+    /// one. What came back was a database enforcing two constraints its source did not,
+    /// and reading the script would not have shown it - the statements were simply not
+    /// there. Only applying it and looking again says so.
+    /// </para>
+    /// </summary>
+    [LiveFact]
+    public async Task DisabledServerNamedConstraintsSurviveAFromScratchScript()
+    {
+        var sourceConnection = _sqlServer.CreateDatabase();
+        await SqlServerFixture.ApplyAsync(sourceConnection, ServerNamedAndSwitchedOff, useTransaction: false);
+
+        var source = await SqlServerFixture.ExtractAsync(sourceConnection);
+        AssertStillSwitchedOff("the source database itself", source);
+
+        // The composer's phase plan, which is what a restore from a snapshot runs.
+        var composed = _sqlServer.CreateDatabase();
+        await SqlServerFixture.ApplyAsync(composed, ScriptComposer.ComposeFullScript(source), useTransaction: false);
+        AssertStillSwitchedOff("a composed from-scratch script", await SqlServerFixture.ExtractAsync(composed));
+
+        // And the differ against an empty database, which emits each table's own
+        // definition instead - a second renderer with the same job and the same bug.
+        var created = _sqlServer.CreateDatabase();
+        var diff = _differ.Diff(source, await SqlServerFixture.ExtractAsync(created),
+            includeDrops: true, includeTableDrops: true, allowTableRebuild: true, addOnly: false);
+        await SqlServerFixture.ApplyAsync(created, diff.Script, useTransaction: false);
+
+        var rebuilt = await SqlServerFixture.ExtractAsync(created);
+        AssertStillSwitchedOff("a diff against an empty database", rebuilt);
+
+        // Which is the whole point: the two now compare clean, in both directions,
+        // instead of reporting a difference nobody introduced.
+        Snapshots.AssertNoChanges("after the from-scratch script", Compare(source, rebuilt));
+        Snapshots.AssertNoChanges("after the from-scratch script (reversed)", Compare(rebuilt, source));
+    }
+
+    /// <summary>
+    /// A rebuild run with <c>--include-drops</c> but not <c>--include-table-drops</c>.
+    /// The table pointing at the rebuilt one exists only on the target, and the differ
+    /// says in as many words that it is being kept - so the foreign key standing on it
+    /// has to be there, and enforcing, when the script finishes. Until 1.7 the rebuild
+    /// took it down to clear the way for its <c>DROP TABLE</c> and never put it back.
+    /// </summary>
+    [LiveFact]
+    public async Task RebuildKeepsAnInboundKeyOnATableItWasNotAskedToDrop()
+    {
+        var sourceConnection = _sqlServer.CreateDatabase();
+        await SqlServerFixture.ApplyAsync(sourceConnection, """
+            CREATE SCHEMA keep;
+            GO
+            CREATE TABLE keep.Widget
+            (
+                WidgetId int IDENTITY(1, 1) NOT NULL CONSTRAINT PK_Widget PRIMARY KEY,
+                Sku      varchar(40)        NOT NULL
+            );
+            GO
+            """, useTransaction: false);
+
+        var targetConnection = _sqlServer.CreateDatabase();
+        await SqlServerFixture.ApplyAsync(targetConnection, """
+            CREATE SCHEMA keep;
+            GO
+            CREATE TABLE keep.Widget
+            (
+                WidgetId int         NOT NULL CONSTRAINT PK_Widget PRIMARY KEY,
+                Sku      varchar(40) NOT NULL
+            );
+            GO
+            CREATE TABLE keep.WidgetLog
+            (
+                LogId    int IDENTITY(1, 1) NOT NULL CONSTRAINT PK_WidgetLog PRIMARY KEY,
+                WidgetId int                NOT NULL CONSTRAINT FK_WidgetLog_Widget
+                                                     REFERENCES keep.Widget (WidgetId)
+            );
+            GO
+            INSERT INTO keep.Widget (WidgetId, Sku) VALUES (1, 'W-001'), (2, 'W-002');
+            GO
+            INSERT INTO keep.WidgetLog (WidgetId) VALUES (1);
+            GO
+            """, useTransaction: false);
+
+        var source = await SqlServerFixture.ExtractAsync(sourceConnection);
+        var target = await SqlServerFixture.ExtractAsync(targetConnection);
+
+        var diff = _differ.Diff(source, target, includeDrops: true, includeTableDrops: false,
+            allowTableRebuild: true, addOnly: false);
+        Assert.Contains("REBUILD [keep].[Widget]", diff.Script);
+        Assert.Contains("table exists only on target and was not dropped: [keep].[WidgetLog]", diff.Script);
+        Assert.Contains("FK_WidgetLog_Widget is put back", diff.Script);
+
+        var applied = await SqlServerFixture.ApplyAsync(targetConnection, diff.Script, useTransaction: true);
+        Assert.False(applied.RolledBack);
+
+        var rebuilt = await SqlServerFixture.ExtractAsync(targetConnection);
+        Assert.True(rebuilt.Table("keep", "Widget").Column("WidgetId").IsIdentity,
+            "the rebuild was supposed to add the identity");
+        rebuilt.Table("keep", "WidgetLog").ForeignKey("FK_WidgetLog_Widget");
+
+        // There, and enforcing: the log row that pointed at a widget still does, and one
+        // that points at nothing is still refused.
+        Assert.Equal(2, await SqlServerFixture.ScalarAsync<int>(targetConnection, "SELECT COUNT(*) FROM keep.Widget;"));
+        Assert.Equal(1, await SqlServerFixture.ScalarAsync<int>(targetConnection, "SELECT COUNT(*) FROM keep.WidgetLog;"));
+        await Assert.ThrowsAnyAsync<SqlException>(() => SqlServerFixture.ApplyAsync(targetConnection,
+            "INSERT INTO keep.WidgetLog (WidgetId) VALUES (99);", useTransaction: true));
+    }
+
+    /// <summary>
+    /// A check constraint and a foreign key with no name of their own, both switched
+    /// off by the names this server invented for them - which is exactly the state a
+    /// script generated somewhere else cannot name.
+    /// </summary>
+    private const string ServerNamedAndSwitchedOff = """
+        CREATE SCHEMA nn;
+        GO
+
+        CREATE TABLE nn.Widget
+        (
+            WidgetId int            NOT NULL CONSTRAINT PK_Widget PRIMARY KEY,
+            Price    decimal(12, 2) NOT NULL,
+            CHECK (Price >= 0)
+        );
+        GO
+
+        CREATE TABLE nn.WidgetLog
+        (
+            LogId    int NOT NULL CONSTRAINT PK_WidgetLog PRIMARY KEY,
+            WidgetId int NOT NULL FOREIGN KEY REFERENCES nn.Widget (WidgetId)
+        );
+        GO
+
+        DECLARE @sql nvarchar(max);
+
+        SELECT @sql = N'ALTER TABLE nn.Widget NOCHECK CONSTRAINT ' + QUOTENAME(name)
+        FROM sys.check_constraints
+        WHERE parent_object_id = OBJECT_ID(N'nn.Widget');
+        EXEC sys.sp_executesql @sql;
+
+        SELECT @sql = N'ALTER TABLE nn.WidgetLog NOCHECK CONSTRAINT ' + QUOTENAME(name)
+        FROM sys.foreign_keys
+        WHERE parent_object_id = OBJECT_ID(N'nn.WidgetLog');
+        EXEC sys.sp_executesql @sql;
+        GO
+        """;
+
+    /// <summary>
+    /// Both constraints are still nameless and still switched off. The names are not
+    /// compared - they cannot be, they are different on every database - which is the
+    /// reason the disable has to be resolved on the server in the first place.
+    /// </summary>
+    private static void AssertStillSwitchedOff(string what, DatabaseSnapshot snapshot)
+    {
+        var check = Assert.Single(snapshot.Table("nn", "Widget").CheckConstraints);
+        Assert.True(check.IsSystemNamed,
+            $"{what}: the check constraint was supposed to keep a server-generated name, got [{check.Name}].");
+        Assert.True(check.IsDisabled,
+            $"{what}: [{check.Name}] on [nn].[Widget] is enforcing again, and the source had it switched off.");
+
+        var foreignKey = Assert.Single(snapshot.Table("nn", "WidgetLog").ForeignKeys);
+        Assert.True(foreignKey.IsSystemNamed,
+            $"{what}: the foreign key was supposed to keep a server-generated name, got [{foreignKey.Name}].");
+        Assert.True(foreignKey.IsDisabled,
+            $"{what}: [{foreignKey.Name}] on [nn].[WidgetLog] is enforcing again, and the source had it switched off.");
     }
 
     private DiffResult Compare(DatabaseSnapshot source, DatabaseSnapshot target) =>
