@@ -151,6 +151,7 @@ public class ScriptComposerTests
                 "010_schemas.sql",
                 "020_types.sql",
                 "030_sequences.sql",
+                "035_synonyms.sql",
                 "040_tables.sql",
                 "050_indexes.sql",
                 "060_checks.sql",

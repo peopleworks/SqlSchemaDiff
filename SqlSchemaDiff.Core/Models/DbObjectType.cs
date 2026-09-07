@@ -12,5 +12,9 @@ public enum DbObjectType
     // whether the consumer serialized the enum by name or by number.
     Trigger,
     Sequence,
-    TableType
+    TableType,
+
+    // Added in 1.7, appended for the same reason: a 1.6 snapshot has to keep
+    // deserializing, whichever way its producer wrote the enum.
+    Synonym
 }
