@@ -338,3 +338,21 @@ GO
 
 DISABLE TRIGGER ops.trAuditEntryBlockDelete ON ops.AuditEntry;
 GO
+
+-- ----------------------------------------------------------------- synonyms
+
+-- A synonym is a name, not an object with a shape, and CREATE SYNONYM never
+-- resolves what it points at. sys.synonyms hands base_object_name back already
+-- bracket-quoted, so the renderer emits it verbatim: quoting it again would give
+-- [[sales]].[[Customer]], and resolving it would invent a lookup the server does
+-- not do.
+
+-- Two parts: another schema in this database.
+CREATE SYNONYM dbo.Customer FOR sales.Customer;
+GO
+
+-- Three parts, naming a database that does not exist here. This is the case that
+-- proves the point: it creates, it extracts, and it has to script back out
+-- unchanged rather than being re-quoted or resolved away.
+CREATE SYNONYM ops.RemoteLedger FOR [Archive].[dbo].[Ledger];
+GO

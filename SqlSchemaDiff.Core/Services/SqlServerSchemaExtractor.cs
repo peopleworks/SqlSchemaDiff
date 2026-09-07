@@ -54,6 +54,7 @@ public sealed class SqlServerSchemaExtractor
         var objects = new List<DbSchemaObject>();
         objects.AddRange(sequences.Select(BuildSequenceObject));
         objects.AddRange(await ExtractTableTypesAsync(connection, columns, keyConstraints, checkConstraints, cancellationToken));
+        objects.AddRange(await ExtractSynonymsAsync(connection, cancellationToken));
 
         foreach(var table in tables)
         {
@@ -1120,6 +1121,58 @@ public sealed class SqlServerSchemaExtractor
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
             result.Add(reader.GetInt32(0));
+
+        return result;
+    }
+
+    // ---------------------------------------------------------------- synonyms
+
+    /// <summary>
+    /// Synonyms (<c>sys.synonyms</c>).
+    /// <para>
+    /// <c>base_object_name</c> is read and carried through untouched. The catalog
+    /// stores it already bracket-quoted and one to four parts long, and it may name
+    /// a database or a linked server this connection cannot resolve — which is fine,
+    /// because <c>CREATE SYNONYM</c> does not resolve it either.
+    /// </para>
+    /// </summary>
+    private static async Task<List<DbSchemaObject>> ExtractSynonymsAsync(
+        SqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+                           SELECT
+                               s.name AS schema_name,
+                               y.name,
+                               y.base_object_name
+                           FROM sys.synonyms y
+                           INNER JOIN sys.schemas s ON s.schema_id = y.schema_id
+                           WHERE y.is_ms_shipped = 0
+                           ORDER BY s.name, y.name;
+                           """;
+
+        var result = new List<DbSchemaObject>();
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while(await reader.ReadAsync(cancellationToken))
+        {
+            var model = new SynonymModel
+            {
+                Schema = reader.GetString(0),
+                Name = reader.GetString(1),
+                BaseObjectName = reader.IsDBNull(2) ? string.Empty : reader.GetString(2)
+            };
+
+            result.Add(new DbSchemaObject
+            {
+                Type = DbObjectType.Synonym,
+                Schema = model.Schema,
+                Name = model.Name,
+                Definition = SqlRender.BuildSynonymCreate(model),
+                Synonym = model
+            });
+        }
 
         return result;
     }

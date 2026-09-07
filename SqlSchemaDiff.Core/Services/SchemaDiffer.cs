@@ -153,6 +153,32 @@ public sealed class SchemaDiffer
                 continue;
             }
 
+            // There is no ALTER SYNONYM either, so a synonym that points somewhere
+            // else is dropped and created again. Unlike a table type, that is free:
+            // a synonym holds no data, and DROP SYNONYM never fails on a module that
+            // names it, because a synonym is resolved when it is used rather than
+            // when the module referencing it is compiled.
+            if(sourceObject.Type == DbObjectType.Synonym
+                && sourceObject.Synonym is not null
+                && targetObject.Synonym is not null)
+            {
+                if(SynonymsEqual(sourceObject.Synonym, targetObject.Synonym))
+                    continue;
+
+                changed++;
+                changedObjects.Add(sourceObject.Identifier);
+                if(addOnly)
+                {
+                    skipped++;
+                    continue;
+                }
+
+                dropStatements.Add(BuildDropStatement(sourceObject, includeIfExists: true));
+                deferredCreates.Add(new PendingCreate(sourceObject, EnsureTrailingGo(sourceObject.Definition)));
+                emittedObjects.Add(sourceObject);
+                continue;
+            }
+
             // Programmable objects, and legacy tables without a structured model on one
             // side or the other, fall back to normalized-text comparison.
             var definitionsMatch = DefinitionsMatch(sourceObject, targetObject);
@@ -583,6 +609,18 @@ public sealed class SchemaDiffer
             SchemaTextNormalizer.Normalize(SqlRender.BuildTableTypeCreateScript(target)),
             StringComparison.Ordinal);
 
+    /// <summary>
+    /// Two synonyms match when they point at the same base object. That name is
+    /// compared as text because text is all it is: the catalog stores whatever the
+    /// <c>CREATE</c> said, and what it names may live in a database — or on a linked
+    /// server — that neither side can resolve.
+    /// </summary>
+    private static bool SynonymsEqual(SynonymModel source, SynonymModel target) =>
+        string.Equals(
+            source.BaseObjectName.Trim(),
+            target.BaseObjectName.Trim(),
+            StringComparison.OrdinalIgnoreCase);
+
     private static List<string> BuildTableTypeRecreateWarnings(DatabaseSnapshot source, DbSchemaObject tableType)
     {
         var dependents = source.Objects
@@ -625,6 +663,8 @@ public sealed class SchemaDiffer
             DbObjectType.Function => "FUNCTION",
             DbObjectType.Trigger => "TRIGGER",
             DbObjectType.Sequence => "SEQUENCE",
+            // OBJECT_ID does find a synonym, so the guard above needs no special case.
+            DbObjectType.Synonym => "SYNONYM",
             _ => throw new InvalidOperationException($"Unsupported object type: {schemaObject.Type}")
         };
 
@@ -642,18 +682,20 @@ public sealed class SchemaDiffer
     /// The tie-breaker the topological sort falls back on when two objects have no
     /// dependency between them. Sequences and table types come before tables and
     /// modules because a column default or a table-valued parameter cannot name one
-    /// that does not exist yet; triggers come last because they need their parent
+    /// that does not exist yet; a synonym joins them because a view or a procedure
+    /// may be written against it; triggers come last because they need their parent
     /// table and everything the trigger body touches.
     /// </summary>
     private static int GetCreateOrder(DbSchemaObject schemaObject) => schemaObject.Type switch
     {
         DbObjectType.Sequence => 0,
         DbObjectType.TableType => 1,
-        DbObjectType.Table => 2,
-        DbObjectType.Function => 3,
-        DbObjectType.View => 4,
-        DbObjectType.StoredProcedure => 5,
-        DbObjectType.Trigger => 6,
+        DbObjectType.Synonym => 2,
+        DbObjectType.Table => 3,
+        DbObjectType.Function => 4,
+        DbObjectType.View => 5,
+        DbObjectType.StoredProcedure => 6,
+        DbObjectType.Trigger => 7,
         _ => 99
     };
 
@@ -662,7 +704,7 @@ public sealed class SchemaDiffer
     /// <summary>
     /// Drops run the other way round, so nothing is dropped while something that
     /// needs it is still there: triggers first, then modules and tables, and the
-    /// sequences and table types they lean on last.
+    /// synonyms, sequences and table types they lean on last.
     /// </summary>
     private static int GetDropOrder(DbSchemaObject schemaObject) => schemaObject.Type switch
     {
@@ -671,8 +713,9 @@ public sealed class SchemaDiffer
         DbObjectType.StoredProcedure => 2,
         DbObjectType.Function => 3,
         DbObjectType.Table => 4,
-        DbObjectType.TableType => 5,
-        DbObjectType.Sequence => 6,
+        DbObjectType.Synonym => 5,
+        DbObjectType.TableType => 6,
+        DbObjectType.Sequence => 7,
         _ => 99
     };
 

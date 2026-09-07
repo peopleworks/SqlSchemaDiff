@@ -825,4 +825,22 @@ public static class SqlRender
 
         return leftValue is null && rightValue is null;
     }
+
+    // ---------------------------------------------------------------- synonyms
+
+    /// <summary>
+    /// <c>CREATE SYNONYM</c>. The synonym's own schema and name are quoted like any
+    /// other identifier; the base object name is emitted <b>exactly</b> as
+    /// <c>sys.synonyms</c> reported it.
+    /// <para>
+    /// The catalog already stores that name bracket-quoted and one to four parts
+    /// long, so quoting it again would produce <c>[[db]].[[dbo]].[[T]]</c>, and
+    /// splitting it would have to guess whether the leading part is a database or a
+    /// linked server. Nothing is lost by leaving it alone: <c>CREATE SYNONYM</c>
+    /// never resolves its target, so a name pointing at a database this connection
+    /// cannot see still creates.
+    /// </para>
+    /// </summary>
+    public static string BuildSynonymCreate(SynonymModel synonym) =>
+        $"CREATE SYNONYM {Quote(synonym.Schema, synonym.Name)} FOR {synonym.BaseObjectName};";
 }
