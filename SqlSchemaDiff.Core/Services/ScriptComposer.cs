@@ -242,6 +242,11 @@ public static class ScriptComposer
         var checkPhase = options.ConstraintsAfterData ? PhaseId.Checks : PhaseId.Tables;
         var indexPhase = options.ConstraintsAfterData ? PhaseId.Indexes : PhaseId.Tables;
 
+        // A memory-optimized table carries its keys and indexes inside CREATE TABLE:
+        // ALTER TABLE ... ADD CONSTRAINT PRIMARY KEY and CREATE INDEX are both
+        // rejected on one, so there is nothing left for the later phases to attach.
+        var inlineKeysAndIndexes = table.IsMemoryOptimized;
+
         add(PhaseId.Tables, new ScriptBatch
         {
             Describe = $"Table {identifier}",
@@ -252,7 +257,20 @@ public static class ScriptComposer
             Retryable = table.Columns.Any(x => x.IsComputed)
         });
 
-        foreach(var keyConstraint in table.KeyConstraints)
+        // System versioning goes to the very end, whatever shape the caller asked
+        // for. SQL Server refuses to version a table with no primary key, and the key
+        // is attached in a later phase; and a versioned table refuses an INSERT that
+        // names its period columns, so a restore has to load its rows first as well.
+        if(SqlRender.IsSystemVersioned(table))
+        {
+            add(PhaseId.Finalize, new ScriptBatch
+            {
+                Describe = $"System versioning on {identifier}",
+                Sql = SqlRender.BuildSystemVersioningOn(table)
+            });
+        }
+
+        foreach(var keyConstraint in inlineKeysAndIndexes ? Enumerable.Empty<KeyConstraintModel>() : table.KeyConstraints)
         {
             var kind = keyConstraint.TypeCode == "PK" ? "Primary key" : "Unique constraint";
             add(keyPhase, new ScriptBatch
@@ -283,7 +301,7 @@ public static class ScriptComposer
             }
         }
 
-        foreach(var index in table.Indexes)
+        foreach(var index in inlineKeysAndIndexes ? Enumerable.Empty<IndexModel>() : table.Indexes)
         {
             add(indexPhase, new ScriptBatch
             {

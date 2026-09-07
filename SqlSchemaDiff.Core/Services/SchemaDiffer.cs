@@ -217,6 +217,17 @@ public sealed class SchemaDiffer
                     deferredCreates.Add(new PendingCreate(sourceObject, fallbackRebuild.Script));
                     emittedObjects.Add(sourceObject);
                 }
+                else if(RebuildIsImpossible(sourceObject.Table) || RebuildIsImpossible(targetObject.Table))
+                {
+                    // Refused above, and the destructive form is no better: the DROP
+                    // is the very statement these tables will not accept.
+                    skipped++;
+                    createInfoStatements.Add($"-- WARNING: table changed and was skipped: {sourceObject.Identifier}");
+                    createInfoStatements.Add(IsSystemVersioned(sourceObject) || IsSystemVersioned(targetObject)
+                        ? "-- A system-versioned table cannot be dropped while SYSTEM_VERSIONING is ON, so it cannot be rebuilt."
+                        : "-- A memory-optimized table's keys and indexes exist only inside its CREATE TABLE, so it cannot be rebuilt.");
+                    createInfoStatements.Add(string.Empty);
+                }
                 else if(allowTableRebuild)
                 {
                     // Neither side has a model: there is no shape to build a copy from
@@ -332,6 +343,15 @@ public sealed class SchemaDiffer
             if(!targetByKey.TryGetValue(sourceObject.Key, out var targetObject))
                 continue;
 
+            // A rebuild is a DROP TABLE with the rows carried across, and neither of
+            // these can be dropped where it stands: SQL Server refuses to drop a table
+            // while SYSTEM_VERSIONING is ON, and a memory-optimized table's keys and
+            // indexes exist only inside its CREATE, so the copy would come back
+            // without them. TableDiffer says so in the script; refusing here is what
+            // keeps a DROP that cannot work out of it.
+            if(RebuildIsImpossible(sourceObject.Table) || RebuildIsImpossible(targetObject.Table))
+                continue;
+
             List<string> reasons;
             if(targetObject.Table is not null)
             {
@@ -359,6 +379,19 @@ public sealed class SchemaDiffer
 
         return plan;
     }
+
+    /// <summary>
+    /// True for a table <see cref="TableRebuilder"/> must not be handed: one that
+    /// cannot be dropped where it stands (system-versioned) or whose shape cannot
+    /// survive being copied into a new table (memory-optimized, whose keys and indexes
+    /// are only expressible inside CREATE TABLE).
+    /// </summary>
+    private static bool RebuildIsImpossible(TableModel? table) =>
+        table is not null && (SqlRender.IsSystemVersioned(table) || table.IsMemoryOptimized);
+
+    /// <summary>Whether an object is a table, and a system-versioned one at that.</summary>
+    private static bool IsSystemVersioned(DbSchemaObject schemaObject) =>
+        schemaObject.Table is not null && SqlRender.IsSystemVersioned(schemaObject.Table);
 
     private static bool DefinitionsMatch(DbSchemaObject source, DbSchemaObject target) =>
         string.Equals(
@@ -388,6 +421,10 @@ public sealed class SchemaDiffer
 
         var schemas = emitted.Select(x => x.Schema)
             .Concat(usedTypes.Select(x => x.Schema))
+            // The schema a system-versioned table's history table goes in. The history
+            // table itself is never emitted — the SYSTEM_VERSIONING clause creates it —
+            // so its schema is named nowhere else and would be missing on the target.
+            .Concat(emitted.Where(x => x.Table is not null).Select(x => x.Table!.HistoryTableSchema ?? string.Empty))
             .Where(x => !string.IsNullOrWhiteSpace(x) && !string.Equals(x, "dbo", StringComparison.OrdinalIgnoreCase))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(x => x, StringComparer.OrdinalIgnoreCase);
