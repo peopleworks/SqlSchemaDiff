@@ -57,7 +57,14 @@ public static class TableRebuilder
     /// <param name="includeDrops">
     /// Whether the caller asked for destructive changes. A foreign key that points at
     /// this table and exists only on the target has to come down for the
-    /// <c>DROP TABLE</c> either way; this decides whether it goes back up afterwards.
+    /// <c>DROP TABLE</c> either way; this is half of what decides whether it goes back
+    /// up afterwards.
+    /// </param>
+    /// <param name="includeTableDrops">
+    /// Whether the caller also asked for tables to be dropped. It is the other half:
+    /// a key whose owning table exists only on the target is only really gone when
+    /// that table goes too, and without this flag the table is explicitly kept. See
+    /// <see cref="Restored"/>.
     /// </param>
     public static TableRebuildResult Build(
         TableModel source,
@@ -65,7 +72,8 @@ public static class TableRebuilder
         DatabaseSnapshot sourceSnapshot,
         DatabaseSnapshot targetSnapshot,
         IReadOnlyList<string> reasons,
-        bool includeDrops)
+        bool includeDrops,
+        bool includeTableDrops)
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(sourceSnapshot);
@@ -83,9 +91,12 @@ public static class TableRebuilder
             .Where(x => Exists(targetSnapshot, x.Owner))
             .ToList();
         // Keys pointing at the table that the source knows nothing about. They come
-        // down for the DROP either way; whether they go back up is the caller's call.
-        var targetOnly = TargetOnly(inboundFromTarget, sourceSnapshot);
-        var orphaned = includeDrops ? new List<InboundForeignKey>() : targetOnly;
+        // down for the DROP either way; whether each one goes back up is decided a key
+        // at a time, because the flags that decide it are two and not one.
+        var targetOnly = TargetOnly(inboundFromTarget, sourceSnapshot)
+            .Select(x => DecideTargetOnly(x, sourceSnapshot, includeDrops, includeTableDrops))
+            .ToList();
+        var orphaned = targetOnly.Where(x => x.Restored).Select(x => x.Key).ToList();
         var triggers = TriggersOn(sourceSnapshot, source);
 
         var sb = new StringBuilder();
@@ -137,8 +148,8 @@ public static class TableRebuilder
         foreach(var check in source.CheckConstraints)
         {
             Batch(SqlRender.BuildCheckConstraintAdd(source, check));
-            if(check.IsDisabled && !check.IsSystemNamed)
-                Batch(SqlRender.BuildConstraintNoCheck(source, check.Name));
+            if(check.IsDisabled)
+                Batch(SqlRender.BuildCheckConstraintNoCheck(source, check));
         }
 
         foreach(var index in source.Indexes)
@@ -180,7 +191,7 @@ public static class TableRebuilder
 
     private static string BuildHeader(
         TableModel source, TableModel? target, IReadOnlyList<string> reasons,
-        List<ColumnModel> copied, List<InboundForeignKey> inbound, List<InboundForeignKey> targetOnly,
+        List<ColumnModel> copied, List<InboundForeignKey> inbound, List<TargetOnlyKey> targetOnly,
         bool includeDrops, List<DbSchemaObject> triggers)
     {
         var rule = "-- " + new string('-', 74);
@@ -212,13 +223,20 @@ public static class TableRebuilder
 
         if(targetOnly.Count > 0)
         {
-            var names = string.Join(", ", targetOnly.Select(x => x.ForeignKey.Name));
+            var names = string.Join(", ", targetOnly.Select(x => x.Key.ForeignKey.Name));
             sb.AppendLine($"-- The source knows nothing about {names}.");
-            sb.AppendLine(includeDrops
-                ? "-- Drops were asked for, so it comes down for the rebuild and stays down."
-                : "-- It is put back as the target had it, because dropping it was not asked for;");
+
             if(!includeDrops)
+            {
+                sb.AppendLine("-- It is put back as the target had it, because dropping it was not asked for;");
                 sb.AppendLine("-- re-run with drops enabled to be rid of it.");
+            }
+            else
+            {
+                sb.AppendLine("-- --include-drops was given, so each of them is decided on its own:");
+                foreach(var line in targetOnly.SelectMany(x => x.Reason))
+                    sb.AppendLine($"--   {line}");
+            }
         }
 
         if(triggers.Count > 0)
@@ -340,6 +358,65 @@ public static class TableRebuilder
     }
 
     /// <summary>
+    /// What happens to one key the target has and the source does not: whether it goes
+    /// back up after the <c>DROP TABLE</c>, and the reason, in the words of the flag
+    /// that decided it. The two come from here together so the header cannot say one
+    /// thing while the script does another.
+    /// <para>
+    /// The key comes down either way — the <c>DROP</c> cannot run while it points at
+    /// the table — so the only question is what the run as a whole was asked to do
+    /// with it. Without <c>--include-drops</c> nothing is being removed, and it goes
+    /// back.
+    /// </para>
+    /// <para>
+    /// With <c>--include-drops</c> there are two cases, and 1.6 answered both the same
+    /// way. When the owning table is on the source without this key, the table's own
+    /// diff would have dropped it anyway, and the rebuild leaving it down is that same
+    /// decision reached earlier. When the owning table exists only on the target, it is
+    /// <c>--include-table-drops</c> and not <c>--include-drops</c> that decides its
+    /// fate: without that flag the table is explicitly kept — the differ says so in
+    /// as many words — and a rebuild that took one of its foreign keys away would be
+    /// removing something nobody asked to remove, from a table this run just promised
+    /// to leave alone.
+    /// </para>
+    /// </summary>
+    private static TargetOnlyKey DecideTargetOnly(
+        InboundForeignKey inbound, DatabaseSnapshot sourceSnapshot, bool includeDrops, bool includeTableDrops)
+    {
+        var name = inbound.ForeignKey.Name;
+        var owner = SqlRender.TableIdentifier(inbound.Table);
+
+        // No reason to print: the header says the same thing once, for all of them.
+        if(!includeDrops)
+            return new TargetOnlyKey(inbound, Restored: true, Array.Empty<string>());
+
+        if(Exists(sourceSnapshot, inbound.Owner))
+        {
+            return new TargetOnlyKey(inbound, Restored: false, new[]
+            {
+                $"* {name} stays down: {owner} is on the source without it, so removing",
+                "  it is the change --include-drops asked for."
+            });
+        }
+
+        if(includeTableDrops)
+        {
+            return new TargetOnlyKey(inbound, Restored: false, new[]
+            {
+                $"* {name} stays down: {owner} exists only on the target, and",
+                "  --include-table-drops drops that table, which takes the key with it."
+            });
+        }
+
+        return new TargetOnlyKey(inbound, Restored: true, new[]
+        {
+            $"* {name} is put back: {owner} exists only on the target and",
+            "  --include-table-drops was not given, so this run keeps that table - and a",
+            "  key on a table it is keeping is not the rebuild's to remove."
+        });
+    }
+
+    /// <summary>
     /// The inbound keys the target has and the source does not. They still have to
     /// come down for the <c>DROP TABLE</c>; putting them back is what stops a rebuild
     /// from quietly deleting a constraint nobody asked to delete.
@@ -386,9 +463,10 @@ public static class TableRebuilder
         batch(SqlRender.BuildForeignKeyAdd(table, foreignKey));
 
         // ADD leaves a foreign key switched on, whatever WITH CHECK / WITH NOCHECK
-        // said about validating the rows already there.
-        if(foreignKey.IsDisabled && !foreignKey.IsSystemNamed)
-            batch(SqlRender.BuildConstraintNoCheck(table, foreignKey.Name));
+        // said about validating the rows already there. A key SQL Server named for
+        // itself is switched off by the name it was just given, resolved on the server.
+        if(foreignKey.IsDisabled)
+            batch(SqlRender.BuildForeignKeyNoCheck(table, foreignKey));
     }
 
     // ------------------------------------------------------------------ plumbing
@@ -418,6 +496,13 @@ public static class TableRebuilder
     }
 
     private sealed record InboundForeignKey(DbSchemaObject Owner, TableModel Table, ForeignKeyModel ForeignKey);
+
+    /// <summary>
+    /// A key only the target has, with what <see cref="DecideTargetOnly"/> settled: put
+    /// back after the rebuild or left down, and the line or two the header prints to
+    /// say why.
+    /// </summary>
+    private sealed record TargetOnlyKey(InboundForeignKey Key, bool Restored, IReadOnlyList<string> Reason);
 }
 
 /// <summary>What <see cref="TableRebuilder.Build"/> produced, and what it took on.</summary>

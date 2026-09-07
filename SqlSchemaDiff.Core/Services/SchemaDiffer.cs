@@ -34,7 +34,8 @@ public sealed class SchemaDiffer
         // because a rebuild reaches outside its own table: it drops the foreign keys
         // pointing at it and re-creates the triggers on it, and the objects on the
         // other end of that have to know not to do the same work again.
-        var rebuilds = PlanRebuilds(source, target, targetByKey, includeDrops, allowTableRebuild, tableDiffer);
+        var rebuilds = PlanRebuilds(
+            source, target, targetByKey, includeDrops, includeTableDrops, allowTableRebuild, tableDiffer);
 
         foreach(var sourceObject in source.Objects.OrderBy(GetCreateOrder).ThenBy(x => x.Key, StringComparer.OrdinalIgnoreCase))
         {
@@ -153,6 +154,32 @@ public sealed class SchemaDiffer
                 continue;
             }
 
+            // There is no ALTER SYNONYM either, so a synonym that points somewhere
+            // else is dropped and created again. Unlike a table type, that is free:
+            // a synonym holds no data, and DROP SYNONYM never fails on a module that
+            // names it, because a synonym is resolved when it is used rather than
+            // when the module referencing it is compiled.
+            if(sourceObject.Type == DbObjectType.Synonym
+                && sourceObject.Synonym is not null
+                && targetObject.Synonym is not null)
+            {
+                if(SynonymsEqual(sourceObject.Synonym, targetObject.Synonym))
+                    continue;
+
+                changed++;
+                changedObjects.Add(sourceObject.Identifier);
+                if(addOnly)
+                {
+                    skipped++;
+                    continue;
+                }
+
+                dropStatements.Add(BuildDropStatement(sourceObject, includeIfExists: true));
+                deferredCreates.Add(new PendingCreate(sourceObject, EnsureTrailingGo(sourceObject.Definition)));
+                emittedObjects.Add(sourceObject);
+                continue;
+            }
+
             // Programmable objects, and legacy tables without a structured model on one
             // side or the other, fall back to normalized-text comparison.
             var definitionsMatch = DefinitionsMatch(sourceObject, targetObject);
@@ -189,6 +216,17 @@ public sealed class SchemaDiffer
                     // enough to build the new table and copy what the two have in common.
                     deferredCreates.Add(new PendingCreate(sourceObject, fallbackRebuild.Script));
                     emittedObjects.Add(sourceObject);
+                }
+                else if(RebuildIsImpossible(sourceObject.Table) || RebuildIsImpossible(targetObject.Table))
+                {
+                    // Refused above, and the destructive form is no better: the DROP
+                    // is the very statement these tables will not accept.
+                    skipped++;
+                    createInfoStatements.Add($"-- WARNING: table changed and was skipped: {sourceObject.Identifier}");
+                    createInfoStatements.Add(IsSystemVersioned(sourceObject) || IsSystemVersioned(targetObject)
+                        ? "-- A system-versioned table cannot be dropped while SYSTEM_VERSIONING is ON, so it cannot be rebuilt."
+                        : "-- A memory-optimized table's keys and indexes exist only inside its CREATE TABLE, so it cannot be rebuilt.");
+                    createInfoStatements.Add(string.Empty);
                 }
                 else if(allowTableRebuild)
                 {
@@ -289,6 +327,7 @@ public sealed class SchemaDiffer
         DatabaseSnapshot target,
         Dictionary<string, DbSchemaObject> targetByKey,
         bool includeDrops,
+        bool includeTableDrops,
         bool allowTableRebuild,
         TableDiffer tableDiffer)
     {
@@ -302,6 +341,15 @@ public sealed class SchemaDiffer
         {
             // Missing on the target: a plain CREATE, with no rows to preserve.
             if(!targetByKey.TryGetValue(sourceObject.Key, out var targetObject))
+                continue;
+
+            // A rebuild is a DROP TABLE with the rows carried across, and neither of
+            // these can be dropped where it stands: SQL Server refuses to drop a table
+            // while SYSTEM_VERSIONING is ON, and a memory-optimized table's keys and
+            // indexes exist only inside its CREATE, so the copy would come back
+            // without them. TableDiffer says so in the script; refusing here is what
+            // keeps a DROP that cannot work out of it.
+            if(RebuildIsImpossible(sourceObject.Table) || RebuildIsImpossible(targetObject.Table))
                 continue;
 
             List<string> reasons;
@@ -325,11 +373,25 @@ public sealed class SchemaDiffer
             }
 
             plan.Add(sourceObject.Key, TableRebuilder.Build(
-                sourceObject.Table!, targetObject.Table, source, target, reasons, includeDrops));
+                sourceObject.Table!, targetObject.Table, source, target, reasons,
+                includeDrops, includeTableDrops));
         }
 
         return plan;
     }
+
+    /// <summary>
+    /// True for a table <see cref="TableRebuilder"/> must not be handed: one that
+    /// cannot be dropped where it stands (system-versioned) or whose shape cannot
+    /// survive being copied into a new table (memory-optimized, whose keys and indexes
+    /// are only expressible inside CREATE TABLE).
+    /// </summary>
+    private static bool RebuildIsImpossible(TableModel? table) =>
+        table is not null && (SqlRender.IsSystemVersioned(table) || table.IsMemoryOptimized);
+
+    /// <summary>Whether an object is a table, and a system-versioned one at that.</summary>
+    private static bool IsSystemVersioned(DbSchemaObject schemaObject) =>
+        schemaObject.Table is not null && SqlRender.IsSystemVersioned(schemaObject.Table);
 
     private static bool DefinitionsMatch(DbSchemaObject source, DbSchemaObject target) =>
         string.Equals(
@@ -359,6 +421,10 @@ public sealed class SchemaDiffer
 
         var schemas = emitted.Select(x => x.Schema)
             .Concat(usedTypes.Select(x => x.Schema))
+            // The schema a system-versioned table's history table goes in. The history
+            // table itself is never emitted — the SYSTEM_VERSIONING clause creates it —
+            // so its schema is named nowhere else and would be missing on the target.
+            .Concat(emitted.Where(x => x.Table is not null).Select(x => x.Table!.HistoryTableSchema ?? string.Empty))
             .Where(x => !string.IsNullOrWhiteSpace(x) && !string.Equals(x, "dbo", StringComparison.OrdinalIgnoreCase))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(x => x, StringComparer.OrdinalIgnoreCase);
@@ -583,6 +649,18 @@ public sealed class SchemaDiffer
             SchemaTextNormalizer.Normalize(SqlRender.BuildTableTypeCreateScript(target)),
             StringComparison.Ordinal);
 
+    /// <summary>
+    /// Two synonyms match when they point at the same base object. That name is
+    /// compared as text because text is all it is: the catalog stores whatever the
+    /// <c>CREATE</c> said, and what it names may live in a database — or on a linked
+    /// server — that neither side can resolve.
+    /// </summary>
+    private static bool SynonymsEqual(SynonymModel source, SynonymModel target) =>
+        string.Equals(
+            source.BaseObjectName.Trim(),
+            target.BaseObjectName.Trim(),
+            StringComparison.OrdinalIgnoreCase);
+
     private static List<string> BuildTableTypeRecreateWarnings(DatabaseSnapshot source, DbSchemaObject tableType)
     {
         var dependents = source.Objects
@@ -625,6 +703,8 @@ public sealed class SchemaDiffer
             DbObjectType.Function => "FUNCTION",
             DbObjectType.Trigger => "TRIGGER",
             DbObjectType.Sequence => "SEQUENCE",
+            // OBJECT_ID does find a synonym, so the guard above needs no special case.
+            DbObjectType.Synonym => "SYNONYM",
             _ => throw new InvalidOperationException($"Unsupported object type: {schemaObject.Type}")
         };
 
@@ -642,18 +722,20 @@ public sealed class SchemaDiffer
     /// The tie-breaker the topological sort falls back on when two objects have no
     /// dependency between them. Sequences and table types come before tables and
     /// modules because a column default or a table-valued parameter cannot name one
-    /// that does not exist yet; triggers come last because they need their parent
+    /// that does not exist yet; a synonym joins them because a view or a procedure
+    /// may be written against it; triggers come last because they need their parent
     /// table and everything the trigger body touches.
     /// </summary>
     private static int GetCreateOrder(DbSchemaObject schemaObject) => schemaObject.Type switch
     {
         DbObjectType.Sequence => 0,
         DbObjectType.TableType => 1,
-        DbObjectType.Table => 2,
-        DbObjectType.Function => 3,
-        DbObjectType.View => 4,
-        DbObjectType.StoredProcedure => 5,
-        DbObjectType.Trigger => 6,
+        DbObjectType.Synonym => 2,
+        DbObjectType.Table => 3,
+        DbObjectType.Function => 4,
+        DbObjectType.View => 5,
+        DbObjectType.StoredProcedure => 6,
+        DbObjectType.Trigger => 7,
         _ => 99
     };
 
@@ -662,7 +744,7 @@ public sealed class SchemaDiffer
     /// <summary>
     /// Drops run the other way round, so nothing is dropped while something that
     /// needs it is still there: triggers first, then modules and tables, and the
-    /// sequences and table types they lean on last.
+    /// synonyms, sequences and table types they lean on last.
     /// </summary>
     private static int GetDropOrder(DbSchemaObject schemaObject) => schemaObject.Type switch
     {
@@ -671,8 +753,9 @@ public sealed class SchemaDiffer
         DbObjectType.StoredProcedure => 2,
         DbObjectType.Function => 3,
         DbObjectType.Table => 4,
-        DbObjectType.TableType => 5,
-        DbObjectType.Sequence => 6,
+        DbObjectType.Synonym => 5,
+        DbObjectType.TableType => 6,
+        DbObjectType.Sequence => 7,
         _ => 99
     };
 

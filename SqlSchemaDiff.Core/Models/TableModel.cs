@@ -27,9 +27,10 @@ public sealed class TableModel
 
     /// <summary>
     /// <c>sys.tables.temporal_type_desc</c> for a system-versioned table, null for an
-    /// ordinary one. Captured but not yet rendered: a system-versioned table still
-    /// scripts as a plain table, with a notice, and this is what a composer will need
-    /// to emit <c>PERIOD FOR SYSTEM_TIME</c> and <c>SYSTEM_VERSIONING = ON</c>.
+    /// ordinary one. Since 1.7 this drives the <c>SYSTEM_VERSIONING = ON</c> clause —
+    /// inline on the CREATE for a schema-only script, and a separate
+    /// <c>ALTER TABLE ... SET</c> in the finalize phase for a restore, because rows
+    /// cannot be loaded into a table whose period columns SQL Server is writing.
     /// </summary>
     public string? TemporalType { get; set; }
 
@@ -50,10 +51,10 @@ public sealed class TableModel
 
     /// <summary>
     /// <c>sys.tables.durability_desc</c> (SCHEMA_AND_DATA or SCHEMA_ONLY) for a
-    /// memory-optimized table, null otherwise. Captured but not rendered: a
-    /// memory-optimized table cannot be created without its indexes inline, which is
-    /// a different CREATE TABLE shape than this renderer emits, so extraction reports
-    /// such a table with a notice rather than scripting it wrongly.
+    /// memory-optimized table, null otherwise. Rendered since 1.7 as the
+    /// <c>DURABILITY</c> half of the table's <c>WITH (MEMORY_OPTIMIZED = ON, ...)</c>
+    /// clause; such a table also carries every one of its indexes inside the CREATE,
+    /// because <c>CREATE INDEX</c> is rejected on one.
     /// </summary>
     public string? Durability { get; set; }
 
@@ -102,6 +103,28 @@ public sealed class ColumnModel
     public bool IsSparse { get; set; }
 
     /// <summary>
+    /// <c>sys.columns.generated_always_type</c>: 0 for an ordinary column, 1 for the
+    /// <c>ROW START</c> of a <c>SYSTEM_TIME</c> period and 2 for its <c>ROW END</c>.
+    /// SQL Server writes these two itself, which is what <c>GENERATED ALWAYS</c> says
+    /// and why a versioned table refuses an INSERT that names them.
+    /// </summary>
+    /// <remarks>
+    /// Later values in the same column (a ledger table's transaction id, sequence
+    /// number and user name) are deliberately not rendered: they belong to a feature
+    /// this engine does not script, and guessing at their syntax would produce a
+    /// CREATE TABLE that fails. Only 1 and 2 are acted on. 0 on a snapshot written
+    /// before this was captured, which is also the value for every ordinary column.
+    /// </remarks>
+    public byte GeneratedAlwaysType { get; set; }
+
+    /// <summary>
+    /// <c>sys.columns.is_hidden</c>. A hidden period column is left out of
+    /// <c>SELECT *</c> and of an <c>INSERT</c> with no column list, so it has to be
+    /// restated on the way back or the restored table behaves differently.
+    /// </summary>
+    public bool IsHidden { get; set; }
+
+    /// <summary>
     /// A copy. Used where a column has to be rendered with one property changed —
     /// the rebuild renames a default constraint so the temporary table can carry it
     /// without colliding with the original's — without touching the snapshot the
@@ -128,6 +151,7 @@ public sealed class KeyConstraintModel : IIndexStorageOptions
     public bool AllowRowLocks { get; set; } = true;
     public bool AllowPageLocks { get; set; } = true;
     public string? DataCompression { get; set; }
+    public int BucketCount { get; set; }
 }
 
 public sealed class ForeignKeyModel
@@ -198,6 +222,19 @@ public interface IIndexStorageOptions
     /// NONE and (for a columnstore index) COLUMNSTORE all mean "not scripted".
     /// </summary>
     string? DataCompression { get; set; }
+
+    /// <summary>
+    /// <c>sys.hash_indexes.bucket_count</c>. Non-zero only for a hash index on a
+    /// memory-optimized table, where <c>BUCKET_COUNT</c> is not optional — a hash
+    /// index scripted without one will not create. Zero everywhere else, including
+    /// on a snapshot written before this was captured.
+    /// </summary>
+    /// <remarks>
+    /// SQL Server rounds the requested count up to the next power of two and reports
+    /// the rounded value, so scripting what was read back and reading it again gives
+    /// the same number: a hash index round-trips to an empty diff.
+    /// </remarks>
+    int BucketCount { get; set; }
 }
 
 public sealed class IndexModel : IIndexStorageOptions
@@ -220,6 +257,7 @@ public sealed class IndexModel : IIndexStorageOptions
     public bool AllowRowLocks { get; set; } = true;
     public bool AllowPageLocks { get; set; } = true;
     public string? DataCompression { get; set; }
+    public int BucketCount { get; set; }
 }
 
 public sealed class IndexColumnModel

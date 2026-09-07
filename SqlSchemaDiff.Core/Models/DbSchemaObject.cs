@@ -50,6 +50,12 @@ public sealed class DbSchemaObject
     /// </summary>
     public TableTypeModel? TableType { get; init; }
 
+    /// <summary>
+    /// Structured synonym metadata. Populated only for <see cref="DbObjectType.Synonym"/>.
+    /// Null on snapshots written before 1.7.
+    /// </summary>
+    public SynonymModel? Synonym { get; init; }
+
     [JsonIgnore]
     public string Identifier => $"[{Schema}].[{Name}]";
 

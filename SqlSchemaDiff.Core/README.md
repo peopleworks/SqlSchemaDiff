@@ -1,4 +1,4 @@
-# PeopleWorks.SqlSchemaDiff.Core
+﻿# PeopleWorks.SqlSchemaDiff.Core
 
 The SQL Server schema engine behind [SQLDiff](https://github.com/peopleworks/SqlSchemaDiff),
 packaged as a library so that every tool that needs it shares **one** implementation.
@@ -70,7 +70,7 @@ change rolls back — and `AuditLogger` records what ran.
 
 | Type | Does |
 |---|---|
-| `SqlServerSchemaExtractor` | Reads tables, columns, indexes, keys, constraints, views, procedures, functions, triggers, sequences, table types, alias types and schema owners into a `DatabaseSnapshot` |
+| `SqlServerSchemaExtractor` | Reads tables, columns, indexes, keys, constraints, views, procedures, functions, triggers, sequences, table types, alias types, synonyms and schema owners into a `DatabaseSnapshot` |
 | `SchemaDiffer` | Compares two snapshots and composes the migration script, ordering objects by dependency |
 | `ScriptComposer` | Scripts a whole snapshot, as dependency-ordered phases (`ComposePhases`) or one file (`ComposeFullScript`) |
 | `DependencyOrder` | Topological sort with deterministic tie-breaks and cycle reporting, shared by the differ and the composer |

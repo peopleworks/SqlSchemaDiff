@@ -191,6 +191,17 @@ public static class SqlRender
         if(column.IsRowGuid)
             sb.Append(" ROWGUIDCOL");
 
+        // GENERATED ALWAYS sits between IDENTITY and the nullability, and HIDDEN
+        // immediately after it. Both are part of the column, not of the PERIOD: a
+        // period column that loses them stops being one, and the table stops being
+        // system-versionable.
+        if(BuildGeneratedAlwaysClause(column) is { } generatedAlways)
+        {
+            sb.Append(generatedAlways);
+            if(column.IsHidden)
+                sb.Append(" HIDDEN");
+        }
+
         sb.Append(column.IsNullable ? " NULL" : " NOT NULL");
 
         if(!string.IsNullOrWhiteSpace(column.DefaultDefinition))
@@ -201,6 +212,19 @@ public static class SqlRender
 
         return sb.ToString();
     }
+
+    /// <summary>
+    /// <c> GENERATED ALWAYS AS ROW START</c> / <c>... ROW END</c> for a
+    /// <c>SYSTEM_TIME</c> period column, and null for everything else — including the
+    /// ledger columns that share <c>sys.columns.generated_always_type</c> and would
+    /// need syntax this engine does not emit.
+    /// </summary>
+    public static string? BuildGeneratedAlwaysClause(ColumnModel column) => column.GeneratedAlwaysType switch
+    {
+        1 => " GENERATED ALWAYS AS ROW START",
+        2 => " GENERATED ALWAYS AS ROW END",
+        _ => null
+    };
 
     /// <summary>
     /// Renders <c>CONSTRAINT [name]</c>, or nothing when SQL Server generated the
@@ -265,6 +289,74 @@ public static class SqlRender
         !table.KeyConstraints.Any(x => IsClustered(x.IndexTypeDesc)) &&
         !table.Indexes.Any(x => IsClustered(x.TypeDesc) || IsClusteredColumnstore(x.TypeDesc));
 
+    /// <summary>True for a hash index (<c>sys.indexes.type</c> 7), which only a memory-optimized table can have.</summary>
+    public static bool IsHash(string? indexTypeDesc) =>
+        indexTypeDesc?.Contains("HASH", StringComparison.OrdinalIgnoreCase) == true;
+
+    /// <summary>
+    /// True when the table is system-versioned, i.e. SQL Server keeps every previous
+    /// version of every row in a history table of its own.
+    /// </summary>
+    public static bool IsSystemVersioned(TableModel table) =>
+        !string.IsNullOrWhiteSpace(table.TemporalType) &&
+        table.TemporalType.Contains("SYSTEM_VERSIONED", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// True when the table declares a <c>SYSTEM_TIME</c> period. A period can exist
+    /// without system versioning — that is exactly the state a restore leaves the
+    /// table in until the finalize phase turns versioning on — so this is a separate
+    /// question from <see cref="IsSystemVersioned"/>.
+    /// </summary>
+    public static bool HasSystemTimePeriod(TableModel table) =>
+        !string.IsNullOrWhiteSpace(table.PeriodStartColumn) &&
+        !string.IsNullOrWhiteSpace(table.PeriodEndColumn);
+
+    /// <summary>
+    /// The history table's two-part name, or null when the table names none. A
+    /// system-versioned table always has one: SQL Server creates it if the
+    /// <c>HISTORY_TABLE</c> clause names a table that does not exist yet, which is
+    /// why the extractor skips history tables rather than scripting them.
+    /// </summary>
+    public static string? HistoryTableIdentifier(TableModel table) =>
+        string.IsNullOrWhiteSpace(table.HistoryTableName)
+            ? null
+            : Quote(
+                string.IsNullOrWhiteSpace(table.HistoryTableSchema) ? table.Schema : table.HistoryTableSchema,
+                table.HistoryTableName);
+
+    /// <summary>
+    /// <c>PERIOD FOR SYSTEM_TIME ([start], [end])</c>, or null when the table has no
+    /// period. It is the last element inside <c>CREATE TABLE</c>, after every column.
+    /// </summary>
+    public static string? BuildPeriodClause(TableModel table) =>
+        HasSystemTimePeriod(table)
+            ? $"PERIOD FOR SYSTEM_TIME ({Quote(table.PeriodStartColumn!)}, {Quote(table.PeriodEndColumn!)})"
+            : null;
+
+    /// <summary>Turns system versioning off, which is what lets the table be dropped or its period changed.</summary>
+    public static string BuildSystemVersioningOff(TableModel table) =>
+        $"ALTER TABLE {TableIdentifier(table)} SET (SYSTEM_VERSIONING = OFF);";
+
+    /// <summary>
+    /// Turns system versioning on, naming the history table when the model has one.
+    /// Without a name SQL Server invents one containing the table's object id, which
+    /// would differ on every database and read as drift for ever, so a model that
+    /// names no history table is scripted as an anonymous <c>ON</c> only as a last
+    /// resort — see the caller, which warns.
+    /// </summary>
+    public static string BuildSystemVersioningOn(TableModel table) =>
+        $"ALTER TABLE {TableIdentifier(table)} SET ({BuildSystemVersioningClause(table)});";
+
+    /// <summary>
+    /// The <c>SYSTEM_VERSIONING = ON (...)</c> option itself, shared by the inline
+    /// <c>WITH</c> on CREATE TABLE and the <c>ALTER TABLE ... SET</c> a restore defers
+    /// to the finalize phase, so the two can never drift apart.
+    /// </summary>
+    private static string BuildSystemVersioningClause(TableModel table) =>
+        HistoryTableIdentifier(table) is { } history
+            ? $"SYSTEM_VERSIONING = ON (HISTORY_TABLE = {history})"
+            : "SYSTEM_VERSIONING = ON";
+
     /// <summary>
     /// True when a <c>data_compression_desc</c> is the implicit one for its index
     /// kind and so does not need scripting: nothing captured, NONE for rowstore, or
@@ -296,8 +388,21 @@ public static class SqlRender
     /// rejects FILLFACTOR, PAD_INDEX, IGNORE_DUP_KEY, ALLOW_ROW_LOCKS and
     /// ALLOW_PAGE_LOCKS on one outright; only DATA_COMPRESSION survives.
     /// </param>
-    public static string BuildIndexOptionsClause(IIndexStorageOptions options, bool isColumnstore = false)
+    /// <param name="isMemoryOptimized">
+    /// An index on a memory-optimized table lives in memory: there are no pages to
+    /// fill, lock or compress, and SQL Server rejects every one of those options.
+    /// A hash index's <c>BUCKET_COUNT</c> is the one thing such an index does carry,
+    /// and it is handled ahead of the rest because it is not optional.
+    /// </param>
+    public static string BuildIndexOptionsClause(
+        IIndexStorageOptions options, bool isColumnstore = false, bool isMemoryOptimized = false)
     {
+        if(options.BucketCount > 0)
+            return $" WITH (BUCKET_COUNT = {options.BucketCount})";
+
+        if(isMemoryOptimized)
+            return string.Empty;
+
         var parts = new List<string>();
 
         if(!isColumnstore)
@@ -325,12 +430,29 @@ public static class SqlRender
     /// here for a heap; on any other table the rows belong to an index and
     /// <see cref="BuildIndexOptionsClause"/> writes the setting there.
     /// </summary>
+    /// <remarks>
+    /// <c>SYSTEM_VERSIONING</c> is deliberately not here. It can only be turned on for
+    /// a table that already has a primary key, and this renderer always attaches the
+    /// key with an <c>ALTER TABLE</c> of its own — so versioning is a separate
+    /// statement too, which is also what the restore shape needs: rows have to be in
+    /// before SQL Server starts writing the period columns.
+    /// </remarks>
     public static string BuildTableOptionsClause(TableModel table)
     {
         var parts = new List<string>();
 
-        if(IsHeap(table) && !IsDefaultCompression(table.DataCompression))
+        // MEMORY_OPTIMIZED comes first: the rest of the clause reads as its
+        // qualifiers, and a memory-optimized table has no compression to state.
+        if(table.IsMemoryOptimized)
+        {
+            parts.Add("MEMORY_OPTIMIZED = ON");
+            if(!string.IsNullOrWhiteSpace(table.Durability))
+                parts.Add($"DURABILITY = {table.Durability.Trim().ToUpperInvariant()}");
+        }
+        else if(IsHeap(table) && !IsDefaultCompression(table.DataCompression))
+        {
             parts.Add($"DATA_COMPRESSION = {table.DataCompression!.Trim().ToUpperInvariant()}");
+        }
 
         return parts.Count == 0 ? string.Empty : $" WITH ({string.Join(", ", parts)})";
     }
@@ -433,6 +555,9 @@ public static class SqlRender
 
     public static string BuildIndexCreate(TableModel table, IndexModel index)
     {
+        if(table.IsMemoryOptimized)
+            return BuildInlineIndexAdd(table, index);
+
         if(IsColumnstore(index.TypeDesc))
             return BuildColumnstoreIndexCreate(table, index);
 
@@ -478,7 +603,9 @@ public static class SqlRender
     }
 
     public static string BuildIndexDrop(TableModel table, IndexModel index) =>
-        $"DROP INDEX {Quote(index.Name)} ON {TableIdentifier(table)};";
+        table.IsMemoryOptimized
+            ? BuildInlineIndexDrop(table, index)
+            : $"DROP INDEX {Quote(index.Name)} ON {TableIdentifier(table)};";
 
     /// <summary>
     /// Drops a constraint by name. Drops always come from the target model, so the
@@ -491,6 +618,161 @@ public static class SqlRender
     /// <summary>Stops validating a constraint without dropping it.</summary>
     public static string BuildConstraintNoCheck(TableModel table, string name) =>
         $"ALTER TABLE {TableIdentifier(table)} NOCHECK CONSTRAINT {Quote(name)};";
+
+    /// <summary>
+    /// The <c>NOCHECK</c> that belongs after the <c>ADD</c> for a check constraint the
+    /// source had switched off.
+    /// <para>
+    /// A constraint the caller named is switched off by that name. One SQL Server named
+    /// for itself cannot be: the <c>CK__Widget__Price__1A2B3C4D</c> in the snapshot
+    /// belongs to the server it was read from, and the <c>ADD</c> above has just been
+    /// handed a fresh one of its own. Naming the old one fails, or - worse - finds
+    /// something else that happens to answer to it. Until 1.7 the renderers gave up at
+    /// that point and emitted nothing, which left the constraint enforcing on a target
+    /// whose source had it off, and said nothing about it.
+    /// </para>
+    /// <para>
+    /// So the name is resolved on the server, at the moment the script runs, from the
+    /// two things that do carry across: the table the constraint stands on and the
+    /// predicate it enforces. Exactly one match is disabled; none or several is left
+    /// alone and printed, because disabling the wrong constraint is worse than
+    /// disabling nothing.
+    /// </para>
+    /// </summary>
+    public static string BuildCheckConstraintNoCheck(TableModel table, CheckConstraintModel check) =>
+        IsServerNamed(check.Name, check.IsSystemNamed)
+            ? BuildResolvedNoCheck(
+                table,
+                "CHECK constraint",
+                $"the predicate {Collapse(check.Definition)}",
+                BuildCheckConstraintLookup(table, check))
+            : BuildConstraintNoCheck(table, check.Name);
+
+    /// <summary>
+    /// The <c>NOCHECK</c> that belongs after the <c>ADD</c> for a foreign key the source
+    /// had switched off. Same problem and same answer as
+    /// <see cref="BuildCheckConstraintNoCheck"/>; a foreign key is matched on the table
+    /// it sits on, the table it points at, and its column pairs in order.
+    /// </summary>
+    public static string BuildForeignKeyNoCheck(TableModel table, ForeignKeyModel foreignKey) =>
+        IsServerNamed(foreignKey.Name, foreignKey.IsSystemNamed)
+            ? BuildResolvedNoCheck(
+                table,
+                "FOREIGN KEY",
+                $"the reference to {Quote(foreignKey.ReferencedSchema, foreignKey.ReferencedTable)} " +
+                $"on ({string.Join(", ", foreignKey.Columns.Select(x => Quote(x.ParentColumn)))})",
+                BuildForeignKeyLookup(table, foreignKey))
+            : BuildConstraintNoCheck(table, foreignKey.Name);
+
+    /// <summary>
+    /// True when the script cannot put a name in a <c>NOCHECK CONSTRAINT</c> clause and
+    /// expect it to mean anything on the target. A missing name counts: a model that
+    /// carries none is in the same position as one whose name the server invented.
+    /// </summary>
+    private static bool IsServerNamed(string? name, bool isSystemNamed) =>
+        isSystemNamed || string.IsNullOrWhiteSpace(name);
+
+    /// <summary>
+    /// The batch that resolves a server-generated name and switches that one constraint
+    /// off. <paramref name="matchedOn"/> is what the lookup keys on, said in English,
+    /// because it is the first thing a reviewer wants to know and the last thing the run
+    /// says when the lookup comes to nothing.
+    /// </summary>
+    private static string BuildResolvedNoCheck(TableModel table, string kind, string matchedOn, string lookup)
+    {
+        var tableId = TableIdentifier(table);
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"-- The {kind} added above was disabled on the source and SQL Server had named");
+        sb.AppendLine("-- it, so the name it carried there is not the name it has here. Find the one");
+        sb.AppendLine($"-- this script just created on {tableId} by {matchedOn},");
+        sb.AppendLine("-- and switch that one off. Nothing is disabled unless the lookup comes to");
+        sb.AppendLine("-- exactly one constraint.");
+        sb.AppendLine("DECLARE @name sysname, @matches int, @sql nvarchar(max);");
+        sb.AppendLine();
+        sb.AppendLine(lookup);
+        sb.AppendLine();
+        sb.AppendLine("IF @matches = 1");
+        sb.AppendLine("BEGIN");
+
+        // EXEC() takes variables and string literals and nothing else, so QUOTENAME
+        // cannot go inside it: the resolved name is quoted into a variable first.
+        sb.AppendLine($"    SET @sql = N'ALTER TABLE {Literal(tableId)} NOCHECK CONSTRAINT ' + QUOTENAME(@name);");
+        sb.AppendLine("    EXEC sys.sp_executesql @sql;");
+        sb.AppendLine("END");
+        sb.AppendLine("ELSE");
+        sb.AppendLine($"    PRINT N'-- WARNING: the {Literal(kind)} on {Literal(tableId)} matched on '");
+        sb.AppendLine($"        + N'{Literal(matchedOn)} came to ' + CAST(@matches AS nvarchar(12))");
+        sb.Append("        + N' constraint(s), not one, so it was left enabled.';");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Finds a server-named check constraint on the table by its predicate. The
+    /// comparison ignores whitespace on both sides: SQL Server rewrites an expression
+    /// from its own parse tree, and a snapshot that was hand-written or produced by an
+    /// older extractor need not have spaced it the same way.
+    /// </summary>
+    private static string BuildCheckConstraintLookup(TableModel table, CheckConstraintModel check)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("SELECT @matches = COUNT(*), @name = MIN(cc.name)");
+        sb.AppendLine("FROM sys.check_constraints AS cc");
+        sb.AppendLine($"WHERE cc.parent_object_id = OBJECT_ID(N'{Literal(TableIdentifier(table))}')");
+        sb.AppendLine("  AND cc.is_system_named = 1");
+        sb.AppendLine($"  AND {Unspaced("cc.definition")} =");
+        sb.Append($"      {Unspaced($"N'{Literal(check.Definition)}'")};");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Finds a server-named foreign key on the table by what it points at and the column
+    /// pairs it points with. The count and the <c>EXCEPT</c> together are an equality:
+    /// the key has as many columns as the source's, and not one pair the source does not
+    /// have.
+    /// </summary>
+    private static string BuildForeignKeyLookup(TableModel table, ForeignKeyModel foreignKey)
+    {
+        var expected = foreignKey.Columns
+            .Select((x, i) => $"({i + 1}, N'{Literal(x.ParentColumn)}', N'{Literal(x.ReferencedColumn)}')");
+
+        var sb = new StringBuilder();
+        sb.AppendLine("SELECT @matches = COUNT(*), @name = MIN(fk.name)");
+        sb.AppendLine("FROM sys.foreign_keys AS fk");
+        sb.AppendLine($"WHERE fk.parent_object_id = OBJECT_ID(N'{Literal(TableIdentifier(table))}')");
+        sb.AppendLine("  AND fk.referenced_object_id = " +
+                      $"OBJECT_ID(N'{Literal(Quote(foreignKey.ReferencedSchema, foreignKey.ReferencedTable))}')");
+        sb.AppendLine("  AND fk.is_system_named = 1");
+        sb.AppendLine("  AND (SELECT COUNT(*) FROM sys.foreign_key_columns AS c");
+        sb.AppendLine($"       WHERE c.constraint_object_id = fk.object_id) = {foreignKey.Columns.Count}");
+        sb.AppendLine("  AND NOT EXISTS");
+        sb.AppendLine("      (");
+        sb.AppendLine("          SELECT fkc.constraint_column_id, pc.name AS parent_column, rc.name AS referenced_column");
+        sb.AppendLine("          FROM sys.foreign_key_columns AS fkc");
+        sb.AppendLine("          INNER JOIN sys.columns AS pc ON pc.object_id = fkc.parent_object_id");
+        sb.AppendLine("                                      AND pc.column_id = fkc.parent_column_id");
+        sb.AppendLine("          INNER JOIN sys.columns AS rc ON rc.object_id = fkc.referenced_object_id");
+        sb.AppendLine("                                      AND rc.column_id = fkc.referenced_column_id");
+        sb.AppendLine("          WHERE fkc.constraint_object_id = fk.object_id");
+        sb.AppendLine("          EXCEPT");
+        sb.AppendLine("          SELECT *");
+        sb.AppendLine($"          FROM (VALUES {string.Join(", ", expected)})");
+        sb.AppendLine("               AS expected (constraint_column_id, parent_column, referenced_column)");
+        sb.Append("      );");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// A T-SQL expression with every space, tab and line break taken out of
+    /// <paramref name="expression"/>, so two spellings of the same predicate compare
+    /// equal.
+    /// </summary>
+    private static string Unspaced(string expression) =>
+        $"REPLACE(REPLACE(REPLACE(REPLACE({expression}, NCHAR(13), N''), NCHAR(10), N''), NCHAR(9), N''), N' ', N'')";
+
+    /// <summary>One line of whatever came in, for a comment or a PRINT.</summary>
+    private static string Collapse(string text) =>
+        string.Join(" ", text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
     public static string BuildIndexDisable(TableModel table, IndexModel index) =>
         $"ALTER INDEX {Quote(index.Name)} ON {TableIdentifier(table)} DISABLE;";
@@ -546,21 +828,42 @@ public static class SqlRender
 
     /// <summary>
     /// Renders only the <c>CREATE TABLE</c> statement: columns, computed columns,
-    /// identity and inline defaults. Everything that can be attached later (keys,
-    /// checks, indexes, foreign keys) is left to the callers that place those in
-    /// their own phase.
+    /// identity and inline defaults, plus the <c>PERIOD FOR SYSTEM_TIME</c> a temporal
+    /// table declares. Everything that can be attached later (keys, checks, indexes,
+    /// foreign keys) is left to the callers that place those in their own phase.
+    /// <para>
+    /// A memory-optimized table is the exception: <c>CREATE INDEX</c> and
+    /// <c>ALTER TABLE ... ADD CONSTRAINT PRIMARY KEY</c> are both rejected on one, so
+    /// its keys and indexes are written inline here and the callers must not emit them
+    /// a second time.
+    /// </para>
     /// </summary>
     public static string BuildTableCreateOnly(TableModel table)
     {
+        var elements = new List<string>(table.Columns.Select(BuildColumnDefinition));
+
+        if(table.IsMemoryOptimized)
+        {
+            elements.AddRange(table.KeyConstraints.Select(BuildInlineKeyConstraint));
+            elements.AddRange(table.Indexes.Select(BuildInlineIndex));
+        }
+
+        // The period is the last element inside the parentheses, after every column
+        // and after anything the table carries inline.
+        if(BuildPeriodClause(table) is { } period)
+            elements.Add(period);
+
         var sb = new StringBuilder();
+        if(table.IsMemoryOptimized)
+            sb.AppendLine(MemoryOptimizedFilegroupComment);
+
         sb.AppendLine($"CREATE TABLE {TableIdentifier(table)}");
         sb.AppendLine("(");
-        for(var i = 0; i < table.Columns.Count; i++)
+        for(var i = 0; i < elements.Count; i++)
         {
-            var isLastColumn = i == table.Columns.Count - 1;
             sb.Append("    ");
-            sb.Append(BuildColumnDefinition(table.Columns[i]));
-            if(!isLastColumn)
+            sb.Append(elements[i]);
+            if(i != elements.Count - 1)
                 sb.Append(',');
             sb.AppendLine();
         }
@@ -568,9 +871,72 @@ public static class SqlRender
         return sb.ToString();
     }
 
+    /// <summary>
+    /// The one thing about a memory-optimized table the engine cannot script. Adding
+    /// the filegroup needs a path on the server's own disk, which no snapshot knows
+    /// and no tool should guess, so the script says what the database needs and the
+    /// operator provides it.
+    /// </summary>
+    public static string MemoryOptimizedFilegroupComment =>
+        "-- Requires a filegroup CONTAINS MEMORY_OPTIMIZED_DATA on the target database;" + Environment.NewLine +
+        "-- it names a path on the server's own disk, so it has to be added by hand.";
+
+    /// <summary>
+    /// A <c>PRIMARY KEY</c> or <c>UNIQUE</c> written inside <c>CREATE TABLE</c>, in
+    /// the form a memory-optimized table needs: never clustered, and carrying
+    /// <c>HASH ... WITH (BUCKET_COUNT = n)</c> when the index behind it is a hash.
+    /// </summary>
+    public static string BuildInlineKeyConstraint(KeyConstraintModel keyConstraint)
+    {
+        var columnsSql = string.Join(", ", keyConstraint.Columns.Select(BuildIndexColumnExpression));
+        var constraintKind = keyConstraint.TypeCode == "PK" ? "PRIMARY KEY" : "UNIQUE";
+        var indexKind = IsHash(keyConstraint.IndexTypeDesc) ? "NONCLUSTERED HASH" : "NONCLUSTERED";
+        var name = BuildInlineConstraintName(keyConstraint.Name, keyConstraint.IsSystemNamed);
+
+        // A hash index has no order, so its columns are listed bare.
+        if(IsHash(keyConstraint.IndexTypeDesc))
+            columnsSql = string.Join(", ", keyConstraint.Columns.Select(x => Quote(x.Name)));
+
+        return $"{name}{constraintKind} {indexKind} ({columnsSql})" +
+               BuildIndexOptionsClause(keyConstraint, isColumnstore: false, isMemoryOptimized: true);
+    }
+
+    /// <summary>
+    /// An <c>INDEX [name] ...</c> element inside <c>CREATE TABLE</c>, the only place a
+    /// memory-optimized table's secondary indexes can be declared.
+    /// </summary>
+    public static string BuildInlineIndex(IndexModel index)
+    {
+        var isHash = IsHash(index.TypeDesc);
+        var columnsSql = isHash
+            ? string.Join(", ", index.Columns.Select(x => Quote(x.Name)))
+            : string.Join(", ", index.Columns.Where(x => !x.IsIncluded).Select(BuildIndexColumnExpression));
+
+        return $"INDEX {Quote(index.Name)} {(isHash ? "HASH" : "NONCLUSTERED")} ({columnsSql})" +
+               BuildIndexOptionsClause(index, isColumnstore: false, isMemoryOptimized: true);
+    }
+
+    /// <summary>
+    /// Adds an index to a memory-optimized table. <c>CREATE INDEX</c> is rejected on
+    /// one outright ("The operation 'CREATE INDEX' is not supported with memory
+    /// optimized tables"); <c>ALTER TABLE ... ADD INDEX</c> is the form that works.
+    /// </summary>
+    public static string BuildInlineIndexAdd(TableModel table, IndexModel index) =>
+        $"ALTER TABLE {TableIdentifier(table)} ADD {BuildInlineIndex(index)};";
+
+    /// <summary>The matching drop; <c>DROP INDEX ... ON ...</c> is rejected the same way.</summary>
+    public static string BuildInlineIndexDrop(TableModel table, IndexModel index) =>
+        $"ALTER TABLE {TableIdentifier(table)} DROP INDEX {Quote(index.Name)};";
+
     /// <summary>Renders the complete CREATE TABLE script (table + keys + FKs + checks + indexes).</summary>
     public static string BuildTableCreateScript(TableModel table)
     {
+        // A memory-optimized table's keys and indexes are already inside its CREATE,
+        // and neither can be added afterwards, so it takes a script of its own rather
+        // than the key and index loops below.
+        if(table.IsMemoryOptimized)
+            return BuildMemoryOptimizedTableCreateScript(table);
+
         var sb = new StringBuilder();
         sb.AppendLine(BuildTableCreateOnly(table));
         sb.AppendLine("GO");
@@ -588,9 +954,9 @@ public static class SqlRender
             sb.AppendLine(BuildForeignKeyAdd(table, foreignKey));
             sb.AppendLine("GO");
 
-            if(foreignKey.IsDisabled && !foreignKey.IsSystemNamed)
+            if(foreignKey.IsDisabled)
             {
-                sb.AppendLine(BuildConstraintNoCheck(table, foreignKey.Name));
+                sb.AppendLine(BuildForeignKeyNoCheck(table, foreignKey));
                 sb.AppendLine("GO");
             }
 
@@ -602,9 +968,9 @@ public static class SqlRender
             sb.AppendLine(BuildCheckConstraintAdd(table, check));
             sb.AppendLine("GO");
 
-            if(check.IsDisabled && !check.IsSystemNamed)
+            if(check.IsDisabled)
             {
-                sb.AppendLine(BuildConstraintNoCheck(table, check.Name));
+                sb.AppendLine(BuildCheckConstraintNoCheck(table, check));
                 sb.AppendLine("GO");
             }
 
@@ -625,6 +991,59 @@ public static class SqlRender
             sb.AppendLine();
         }
 
+        AppendSystemVersioning(sb, table);
+        return sb.ToString().TrimEnd();
+    }
+
+    /// <summary>
+    /// Turns system versioning on, last of all. It has to be last: SQL Server refuses
+    /// to version a table with no primary key, and the key arrives as an ALTER of its
+    /// own a few batches above.
+    /// </summary>
+    private static void AppendSystemVersioning(StringBuilder sb, TableModel table)
+    {
+        if(!IsSystemVersioned(table))
+            return;
+
+        sb.AppendLine(BuildSystemVersioningOn(table));
+        sb.AppendLine("GO");
+        sb.AppendLine();
+    }
+
+    /// <summary>
+    /// The same script for a memory-optimized table. Its keys and indexes came out
+    /// inline in the CREATE, so only the constraints that <c>ALTER TABLE</c> can still
+    /// add — checks and foreign keys — follow it.
+    /// </summary>
+    private static string BuildMemoryOptimizedTableCreateScript(TableModel table)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine(BuildTableCreateOnly(table));
+        sb.AppendLine("GO");
+        sb.AppendLine();
+
+        foreach(var check in table.CheckConstraints)
+        {
+            sb.AppendLine(BuildCheckConstraintAdd(table, check));
+            sb.AppendLine("GO");
+
+            if(check.IsDisabled && !check.IsSystemNamed)
+            {
+                sb.AppendLine(BuildConstraintNoCheck(table, check.Name));
+                sb.AppendLine("GO");
+            }
+
+            sb.AppendLine();
+        }
+
+        foreach(var foreignKey in table.ForeignKeys)
+        {
+            sb.AppendLine(BuildForeignKeyAdd(table, foreignKey));
+            sb.AppendLine("GO");
+            sb.AppendLine();
+        }
+
+        AppendSystemVersioning(sb, table);
         return sb.ToString().TrimEnd();
     }
 
@@ -825,4 +1244,22 @@ public static class SqlRender
 
         return leftValue is null && rightValue is null;
     }
+
+    // ---------------------------------------------------------------- synonyms
+
+    /// <summary>
+    /// <c>CREATE SYNONYM</c>. The synonym's own schema and name are quoted like any
+    /// other identifier; the base object name is emitted <b>exactly</b> as
+    /// <c>sys.synonyms</c> reported it.
+    /// <para>
+    /// The catalog already stores that name bracket-quoted and one to four parts
+    /// long, so quoting it again would produce <c>[[db]].[[dbo]].[[T]]</c>, and
+    /// splitting it would have to guess whether the leading part is a database or a
+    /// linked server. Nothing is lost by leaving it alone: <c>CREATE SYNONYM</c>
+    /// never resolves its target, so a name pointing at a database this connection
+    /// cannot see still creates.
+    /// </para>
+    /// </summary>
+    public static string BuildSynonymCreate(SynonymModel synonym) =>
+        $"CREATE SYNONYM {Quote(synonym.Schema, synonym.Name)} FOR {synonym.BaseObjectName};";
 }

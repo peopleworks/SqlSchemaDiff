@@ -8,9 +8,9 @@ namespace SqlSchemaDiff.Services;
 /// Turns a snapshot into a script that can actually be run from top to bottom.
 /// <para>
 /// The work is done by <see cref="ComposePhases"/>, which splits the schema into
-/// dependency-ordered phases — schemas, types, sequences, tables, indexes,
-/// checks, foreign keys, modules, triggers, finalize. Foreign keys are deferred
-/// to their own phase so a table can reference one that is created later, and
+/// dependency-ordered phases — schemas, types, sequences, synonyms, tables,
+/// indexes, checks, foreign keys, modules, triggers, finalize. Foreign keys are
+/// deferred to their own phase so a table can reference one created later, and
 /// everything else is ordered by <see cref="DbSchemaObject.Dependencies"/> rather
 /// than by object type alone, so a view on a view or a function used by a view
 /// comes out in a runnable order.
@@ -26,6 +26,7 @@ public static class ScriptComposer
         (PhaseId.Schemas, "schemas", "010_schemas.sql"),
         (PhaseId.Types, "types", "020_types.sql"),
         (PhaseId.Sequences, "sequences", "030_sequences.sql"),
+        (PhaseId.Synonyms, "synonyms", "035_synonyms.sql"),
         (PhaseId.Tables, "tables", "040_tables.sql"),
         (PhaseId.Indexes, "indexes", "050_indexes.sql"),
         (PhaseId.Checks, "checks", "060_checks.sql"),
@@ -241,6 +242,11 @@ public static class ScriptComposer
         var checkPhase = options.ConstraintsAfterData ? PhaseId.Checks : PhaseId.Tables;
         var indexPhase = options.ConstraintsAfterData ? PhaseId.Indexes : PhaseId.Tables;
 
+        // A memory-optimized table carries its keys and indexes inside CREATE TABLE:
+        // ALTER TABLE ... ADD CONSTRAINT PRIMARY KEY and CREATE INDEX are both
+        // rejected on one, so there is nothing left for the later phases to attach.
+        var inlineKeysAndIndexes = table.IsMemoryOptimized;
+
         add(PhaseId.Tables, new ScriptBatch
         {
             Describe = $"Table {identifier}",
@@ -251,7 +257,20 @@ public static class ScriptComposer
             Retryable = table.Columns.Any(x => x.IsComputed)
         });
 
-        foreach(var keyConstraint in table.KeyConstraints)
+        // System versioning goes to the very end, whatever shape the caller asked
+        // for. SQL Server refuses to version a table with no primary key, and the key
+        // is attached in a later phase; and a versioned table refuses an INSERT that
+        // names its period columns, so a restore has to load its rows first as well.
+        if(SqlRender.IsSystemVersioned(table))
+        {
+            add(PhaseId.Finalize, new ScriptBatch
+            {
+                Describe = $"System versioning on {identifier}",
+                Sql = SqlRender.BuildSystemVersioningOn(table)
+            });
+        }
+
+        foreach(var keyConstraint in inlineKeysAndIndexes ? Enumerable.Empty<KeyConstraintModel>() : table.KeyConstraints)
         {
             var kind = keyConstraint.TypeCode == "PK" ? "Primary key" : "Unique constraint";
             add(keyPhase, new ScriptBatch
@@ -272,17 +291,17 @@ public static class ScriptComposer
                 Retryable = true
             });
 
-            if(check.IsDisabled && !check.IsSystemNamed)
+            if(check.IsDisabled)
             {
                 add(checkPhase, new ScriptBatch
                 {
                     Describe = Describe("Disable check constraint", check.Name, check.IsSystemNamed, identifier),
-                    Sql = SqlRender.BuildConstraintNoCheck(table, check.Name)
+                    Sql = SqlRender.BuildCheckConstraintNoCheck(table, check)
                 });
             }
         }
 
-        foreach(var index in table.Indexes)
+        foreach(var index in inlineKeysAndIndexes ? Enumerable.Empty<IndexModel>() : table.Indexes)
         {
             add(indexPhase, new ScriptBatch
             {
@@ -308,12 +327,12 @@ public static class ScriptComposer
                 Sql = SqlRender.BuildForeignKeyAdd(table, foreignKey)
             });
 
-            if(foreignKey.IsDisabled && !foreignKey.IsSystemNamed)
+            if(foreignKey.IsDisabled)
             {
                 add(PhaseId.ForeignKeys, new ScriptBatch
                 {
                     Describe = Describe("Disable foreign key", foreignKey.Name, foreignKey.IsSystemNamed, identifier),
-                    Sql = SqlRender.BuildConstraintNoCheck(table, foreignKey.Name)
+                    Sql = SqlRender.BuildForeignKeyNoCheck(table, foreignKey)
                 });
             }
         }
@@ -358,6 +377,7 @@ public static class ScriptComposer
     {
         "Sequence" => 10,
         "TableType" => 10,
+        "Synonym" => 15,
         "Table" => 20,
         "Function" => 30,
         "View" => 40,
@@ -376,6 +396,7 @@ public static class ScriptComposer
     {
         "Sequence" => PhaseId.Sequences,
         "TableType" => PhaseId.Types,
+        "Synonym" => PhaseId.Synonyms,
         "Table" => PhaseId.Tables,
         "Function" => PhaseId.Modules,
         "View" => PhaseId.Modules,
@@ -391,6 +412,7 @@ internal enum PhaseId
     Schemas,
     Types,
     Sequences,
+    Synonyms,
     Tables,
     Indexes,
     Checks,

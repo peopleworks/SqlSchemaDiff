@@ -352,11 +352,13 @@ internal static class ProgramMain
         var triggers = snapshot.Objects.Count(x => x.Type == DbObjectType.Trigger);
         var sequences = snapshot.Objects.Count(x => x.Type == DbObjectType.Sequence);
         var tableTypes = snapshot.Objects.Count(x => x.Type == DbObjectType.TableType);
+        var synonyms = snapshot.Objects.Count(x => x.Type == DbObjectType.Synonym);
 
         Console.WriteLine($"[{label}] Database [{snapshot.DatabaseName}]");
         Console.WriteLine(
             $"Objects: tables={tables}, views={views}, procs={procedures}, funcs={functions}, " +
-            $"triggers={triggers}, sequences={sequences}, table types={tableTypes}");
+            $"triggers={triggers}, sequences={sequences}, table types={tableTypes}, " +
+            $"synonyms={synonyms}");
         if(snapshot.Schemas.Count > 0)
             Console.WriteLine($"Schemas: {string.Join(", ", snapshot.Schemas)}");
         if(snapshot.Types.Count > 0)
@@ -434,7 +436,7 @@ internal static class ProgramMain
               --include <patterns>       Compare only what matches. Comma-separated.
               --exclude <patterns>       Skip what matches, applied after --include.
               A pattern is [type:]glob, where type is table/view/proc/func/trigger/
-              sequence/tabletype and glob
+              sequence/tabletype/synonym and glob
               takes * and ? and matches either schema.name or the bare name:
                 --include "Sales.*"              only the Sales schema
                 --exclude "proc:usp_Temp*,dbo.Audit*"

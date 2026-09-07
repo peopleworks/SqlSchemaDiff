@@ -1,5 +1,6 @@
 using Microsoft.Data.SqlClient;
 using SqlSchemaDiff.Models;
+using SqlSchemaDiff.Services;
 
 namespace SqlSchemaDiff.IntegrationTests;
 
@@ -29,7 +30,8 @@ public sealed class SchemaExtractionTests
         Assert.Equal(2, snapshot.Count(DbObjectType.Trigger));
         Assert.Equal(1, snapshot.Count(DbObjectType.Sequence));
         Assert.Equal(1, snapshot.Count(DbObjectType.TableType));
-        Assert.Equal(18, snapshot.Objects.Count);
+        Assert.Equal(2, snapshot.Count(DbObjectType.Synonym));
+        Assert.Equal(20, snapshot.Objects.Count);
 
         // ---- prerequisites ------------------------------------------------
         Assert.Equal(new[] { "ops", "sales" }, snapshot.Schemas);
@@ -198,6 +200,22 @@ public sealed class SchemaExtractionTests
         Assert.Contains("TableType:sales.InvoiceLineList",
             snapshot.Object(DbObjectType.StoredProcedure, "sales", "uspAddInvoiceLines").Dependencies);
 
+        // ---- synonyms -----------------------------------------------------
+
+        // base_object_name comes back bracket-quoted whatever the CREATE said, and
+        // is carried through exactly as the catalog reported it.
+        var localSynonym = snapshot.Object(DbObjectType.Synonym, "dbo", "Customer");
+        Assert.NotNull(localSynonym.Synonym);
+        Assert.Equal("[sales].[Customer]", localSynonym.Synonym!.BaseObjectName);
+        Assert.Equal("CREATE SYNONYM [dbo].[Customer] FOR [sales].[Customer];", localSynonym.Definition);
+
+        // Three parts, naming a database this server does not have. Nothing tries to
+        // resolve it, so it survives with its brackets intact and undoubled.
+        var remoteSynonym = snapshot.Object(DbObjectType.Synonym, "ops", "RemoteLedger");
+        Assert.NotNull(remoteSynonym.Synonym);
+        Assert.Equal("[Archive].[dbo].[Ledger]", remoteSynonym.Synonym!.BaseObjectName);
+        Assert.DoesNotContain("[[", remoteSynonym.Definition, StringComparison.Ordinal);
+
         // ---- triggers -----------------------------------------------------
         var touch = snapshot.Object(DbObjectType.Trigger, "sales", "trCustomerTouch");
         Assert.NotNull(touch.Trigger);
@@ -213,6 +231,68 @@ public sealed class SchemaExtractionTests
 
         // ---- notices ------------------------------------------------------
         Assert.True(notices.Count == 0, $"unexpected extraction notices: {string.Join(" | ", notices)}");
+    }
+
+    /// <summary>
+    /// The property the whole object type exists for: a database with synonyms
+    /// scripts back out to a database with the same synonyms. Before 1.7 they were
+    /// invisible to the extractor, so a restored database silently lost them.
+    /// </summary>
+    [LiveFact]
+    public async Task SynonymsSurviveComposeAndApply()
+    {
+        var sourceConnection = await _sqlServer.CreateDatabaseWithFullSchemaAsync();
+        var targetConnection = _sqlServer.CreateDatabase();
+
+        var source = await SqlServerFixture.ExtractAsync(sourceConnection);
+        var script = ScriptComposer.ComposeFullScript(source);
+
+        // The synonyms phase runs before the tables phase, so [dbo].[Customer] is
+        // created while [sales].[Customer] still does not exist. That has to work:
+        // CREATE SYNONYM does not resolve its target.
+        Assert.True(
+            script.IndexOf("CREATE SYNONYM [dbo].[Customer]", StringComparison.Ordinal) <
+            script.IndexOf("CREATE TABLE [sales].[Customer]", StringComparison.Ordinal),
+            "the synonym is composed before the table it names");
+
+        await SqlServerFixture.ApplyAsync(targetConnection, script, useTransaction: true);
+
+        var target = await SqlServerFixture.ExtractAsync(targetConnection);
+        Assert.Equal(2, target.Count(DbObjectType.Synonym));
+        Assert.Equal(
+            "[sales].[Customer]",
+            target.Object(DbObjectType.Synonym, "dbo", "Customer").Synonym!.BaseObjectName);
+        Assert.Equal(
+            "[Archive].[dbo].[Ledger]",
+            target.Object(DbObjectType.Synonym, "ops", "RemoteLedger").Synonym!.BaseObjectName);
+
+        var differ = new SchemaDiffer();
+        Snapshots.AssertNoChanges("synonyms source -> target",
+            differ.Diff(source, target, true, true, false, false));
+        Snapshots.AssertNoChanges("synonyms target -> source",
+            differ.Diff(target, source, true, true, false, false));
+
+        // And a repointed synonym reconciles, which is the only kind of drift a
+        // synonym can have and the one there is no ALTER for.
+        await SqlServerFixture.ApplyAsync(
+            targetConnection,
+            """
+            DROP SYNONYM ops.RemoteLedger;
+            GO
+            CREATE SYNONYM ops.RemoteLedger FOR [Other].[dbo].[Ledger];
+            GO
+            """,
+            useTransaction: false);
+
+        var drifted = await SqlServerFixture.ExtractAsync(targetConnection);
+        var repoint = differ.Diff(source, drifted, true, true, false, false);
+        Assert.Equal(1, repoint.Changed);
+        Assert.Contains("[ops].[RemoteLedger]", repoint.ChangedObjects);
+        Assert.Contains("DROP SYNONYM [ops].[RemoteLedger];", repoint.Script);
+
+        await SqlServerFixture.ApplyAsync(targetConnection, repoint.Script, useTransaction: true);
+        Snapshots.AssertNoChanges("after repointing",
+            differ.Diff(source, await SqlServerFixture.ExtractAsync(targetConnection), true, true, false, false));
     }
 
     /// <summary>

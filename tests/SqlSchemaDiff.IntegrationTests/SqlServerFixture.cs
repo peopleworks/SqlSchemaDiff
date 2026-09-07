@@ -35,6 +35,8 @@ public sealed class SqlServerFixture : IAsyncLifetime, IDisposable
     private static readonly Lazy<string> UnsupportedSchema = new(() => ReadScript("unsupported.sql"));
     private static readonly Lazy<string> RebuildBeforeSchema = new(() => ReadScript("rebuild-before.sql"));
     private static readonly Lazy<string> RebuildAfterSchema = new(() => ReadScript("rebuild-after.sql"));
+    private static readonly Lazy<string> SpecialTablesSchema = new(() => ReadScript("special-tables.sql"));
+    private static readonly Lazy<string?> MemoryOptimizedProbe = new(ProbeMemoryOptimized);
 
     private readonly ConcurrentQueue<string> _databases = new();
     private bool _cleanedUp;
@@ -57,6 +59,24 @@ public sealed class SqlServerFixture : IAsyncLifetime, IDisposable
     /// <summary>The same schema with the identity change only a rebuild can make.</summary>
     public static string RebuildAfterScript => RebuildAfterSchema.Value;
 
+    /// <summary>
+    /// System-versioned and memory-optimized tables, in two <c>@@MARKER@@</c> sections
+    /// so the memory-optimized half can be left out where the server will not take a
+    /// MEMORY_OPTIMIZED_DATA filegroup.
+    /// </summary>
+    public static string SpecialTablesScript => SpecialTablesSchema.Value;
+
+    /// <summary>
+    /// Why this server cannot host a memory-optimized table, or null when it can.
+    /// <para>
+    /// The answer is not a property lookup: the edition has to support In-Memory OLTP
+    /// <b>and</b> the instance's data path has to be somewhere the service can create
+    /// a container, so it is settled by actually adding a filegroup to a scratch
+    /// database once per run, and the database is dropped again either way.
+    /// </para>
+    /// </summary>
+    public static string? MemoryOptimizedSkipReason => MemoryOptimizedProbe.Value;
+
     private static string? RawConnectionString => Environment.GetEnvironmentVariable(ConnectionEnvironmentVariable);
 
     /// <summary>The configured connection string, pointed at <c>master</c>.</summary>
@@ -76,6 +96,19 @@ public sealed class SqlServerFixture : IAsyncLifetime, IDisposable
         // rather than SqlBatchExecutor.
         Execute(ServerConnectionString, $"CREATE DATABASE [{name}];");
         return Build(name);
+    }
+
+    /// <summary>
+    /// A fresh database that also has a filegroup <c>CONTAINS MEMORY_OPTIMIZED_DATA</c>,
+    /// which is the one prerequisite of a memory-optimized table that no snapshot can
+    /// carry: it names a path on the server's own disk. Only call this when
+    /// <see cref="MemoryOptimizedSkipReason"/> is null.
+    /// </summary>
+    public string CreateDatabaseWithMemoryOptimizedFilegroup()
+    {
+        var connectionString = CreateDatabase();
+        AddMemoryOptimizedFilegroup(new SqlConnectionStringBuilder(connectionString).InitialCatalog);
+        return connectionString;
     }
 
     /// <summary>A fresh database with <see cref="FullSchemaScript"/> already applied.</summary>
@@ -182,6 +215,71 @@ public sealed class SqlServerFixture : IAsyncLifetime, IDisposable
             throw new InvalidOperationException(
                 "Scratch databases were left behind on the test server and have to be dropped by hand:" +
                 Environment.NewLine + string.Join(Environment.NewLine, failures));
+        }
+    }
+
+    /// <summary>
+    /// Adds the filegroup and its container. The container path comes from the
+    /// instance's own default data path and carries the database's name, so two runs
+    /// never collide and <c>DROP DATABASE</c> takes the directory with it. The whole
+    /// thing is built server-side because the path is the server's, not the client's.
+    /// </summary>
+    private static void AddMemoryOptimizedFilegroup(string databaseName) =>
+        Execute(ServerConnectionString, $"""
+                                         DECLARE @fg sysname = N'{databaseName}_mod';
+                                         DECLARE @path nvarchar(400) =
+                                             CONVERT(nvarchar(300), SERVERPROPERTY('InstanceDefaultDataPath')) + @fg;
+                                         DECLARE @sql nvarchar(max) =
+                                             N'ALTER DATABASE [{databaseName}] ADD FILEGROUP ' + QUOTENAME(@fg) +
+                                             N' CONTAINS MEMORY_OPTIMIZED_DATA;';
+                                         EXEC sp_executesql @sql;
+                                         SET @sql =
+                                             N'ALTER DATABASE [{databaseName}] ADD FILE (NAME = ' + QUOTENAME(@fg, '''') +
+                                             N', FILENAME = ' + QUOTENAME(@path, '''') + N') TO FILEGROUP ' + QUOTENAME(@fg) + N';';
+                                         EXEC sp_executesql @sql;
+                                         """);
+
+    /// <summary>
+    /// Settles <see cref="MemoryOptimizedSkipReason"/> by trying the thing itself on a
+    /// throwaway database, which is dropped whether or not it worked.
+    /// </summary>
+    private static string? ProbeMemoryOptimized()
+    {
+        if(!IsConfigured)
+            return $"{ConnectionEnvironmentVariable} is not set";
+
+        var name = DatabasePrefix + "probe" + Guid.NewGuid().ToString("N")[..8];
+        try
+        {
+            Execute(ServerConnectionString, $"CREATE DATABASE [{name}];");
+        }
+        catch(SqlException ex)
+        {
+            return $"a scratch database could not be created: {ex.Message}";
+        }
+
+        try
+        {
+            AddMemoryOptimizedFilegroup(name);
+            return null;
+        }
+        catch(SqlException ex)
+        {
+            return $"this server will not take a MEMORY_OPTIMIZED_DATA filegroup: {ex.Message}";
+        }
+        finally
+        {
+            try
+            {
+                SqlConnection.ClearAllPools();
+                Drop(name);
+            }
+            catch(SqlException)
+            {
+                // The probe database is named like every other scratch database, so a
+                // failure here leaves an obvious, greppable trace rather than a
+                // mystery — and it must not turn into a test failure of its own.
+            }
         }
     }
 

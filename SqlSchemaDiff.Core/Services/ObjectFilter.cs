@@ -138,6 +138,7 @@ public sealed class ObjectFilter
             "trigger" or "triggers" => DbObjectType.Trigger,
             "sequence" or "sequences" or "seq" or "seqs" => DbObjectType.Sequence,
             "tabletype" or "tabletypes" or "type" or "types" or "tvp" => DbObjectType.TableType,
+            "synonym" or "synonyms" or "syn" => DbObjectType.Synonym,
             _ => null
         };
 
