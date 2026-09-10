@@ -333,6 +333,55 @@ public static class SqlRender
             ? $"PERIOD FOR SYSTEM_TIME ({Quote(table.PeriodStartColumn!)}, {Quote(table.PeriodEndColumn!)})"
             : null;
 
+    /// <summary>
+    /// The same period as an <c>ALTER TABLE ... ADD PERIOD FOR SYSTEM_TIME</c>, for a
+    /// table whose rows are already loaded, followed by the <c>ADD HIDDEN</c> of every
+    /// hidden period column. Null when the table declares no period.
+    /// <para>
+    /// This is the statement that closes the hole a restore used to leave in a
+    /// temporal table's timeline. It converts the two plain <c>datetime2</c> columns
+    /// to <c>GENERATED ALWAYS</c> in place, keeping the values already in them, so the
+    /// rows keep the <c>ValidFrom</c> they had on the source instead of being stamped
+    /// with the instant of the restore.
+    /// </para>
+    /// </summary>
+    /// <remarks>
+    /// Measured against SQL Server 2025. <c>ADD PERIOD</c> refuses the table unless:
+    /// every row's end column holds the maximum value <i>for its own scale</i> —
+    /// <c>9999-12-31 23:59:59.9999999</c> at <c>datetime2(7)</c>, <c>…59.999</c> at
+    /// <c>datetime2(3)</c> — or the statement fails with error 13575; no row's start
+    /// column is in the future (13542); both columns are <c>datetime2</c> of any scale
+    /// (13501 for <c>datetime</c>); both are <c>NOT NULL</c> (13587); and neither is
+    /// already <c>HIDDEN</c> — <c>HIDDEN</c> can only be set on a column that is
+    /// already <c>GENERATED ALWAYS</c> (13735), which is why it is added here, after
+    /// the period, and not on the column in <c>CREATE TABLE</c>. Every one of those
+    /// errors names the table and the condition, so nothing is guarded here that the
+    /// server does not already diagnose better. An empty table is accepted, and so is
+    /// a memory-optimized one.
+    /// </remarks>
+    public static string? BuildPeriodAdd(TableModel table)
+    {
+        if(BuildPeriodClause(table) is not { } period)
+            return null;
+
+        var sb = new StringBuilder();
+        sb.Append($"ALTER TABLE {TableIdentifier(table)} ADD {period};");
+
+        foreach(var column in PeriodColumns(table).Where(x => x.IsHidden))
+            sb.Append($"{Environment.NewLine}ALTER TABLE {TableIdentifier(table)} ALTER COLUMN {Quote(column.Name)} ADD HIDDEN;");
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// The table's <c>SYSTEM_TIME</c> period columns, identified by the
+    /// <c>GENERATED ALWAYS</c> they carry rather than by name — which is the same set
+    /// <see cref="BuildGeneratedAlwaysClause"/> renders, and so the exact set that has
+    /// to lose it when the period is deferred.
+    /// </summary>
+    private static IEnumerable<ColumnModel> PeriodColumns(TableModel table) =>
+        table.Columns.Where(x => BuildGeneratedAlwaysClause(x) is not null);
+
     /// <summary>Turns system versioning off, which is what lets the table be dropped or its period changed.</summary>
     public static string BuildSystemVersioningOff(TableModel table) =>
         $"ALTER TABLE {TableIdentifier(table)} SET (SYSTEM_VERSIONING = OFF);";
@@ -838,9 +887,21 @@ public static class SqlRender
     /// a second time.
     /// </para>
     /// </summary>
-    public static string BuildTableCreateOnly(TableModel table)
+    /// <param name="deferPeriod">
+    /// When true, a <c>SYSTEM_TIME</c> period is left out of the CREATE entirely: the
+    /// two period columns come out as plain <c>datetime2 NOT NULL</c>, with no
+    /// <c>GENERATED ALWAYS</c> and no <c>HIDDEN</c>, and the caller is responsible for
+    /// emitting <see cref="BuildPeriodAdd"/> once the rows are loaded. Off by default,
+    /// which is what every existing caller — the diff path included — gets.
+    /// </param>
+    public static string BuildTableCreateOnly(TableModel table, bool deferPeriod = false)
     {
-        var elements = new List<string>(table.Columns.Select(BuildColumnDefinition));
+        // A period cannot be deferred if there is none; asking for it on an ordinary
+        // table is a no-op rather than an error, so a caller can pass the option
+        // through for every table without testing each one.
+        deferPeriod &= HasSystemTimePeriod(table);
+
+        var elements = new List<string>(table.Columns.Select(x => deferPeriod ? BuildDeferredPeriodColumn(x) : BuildColumnDefinition(x)));
 
         if(table.IsMemoryOptimized)
         {
@@ -850,7 +911,7 @@ public static class SqlRender
 
         // The period is the last element inside the parentheses, after every column
         // and after anything the table carries inline.
-        if(BuildPeriodClause(table) is { } period)
+        if(!deferPeriod && BuildPeriodClause(table) is { } period)
             elements.Add(period);
 
         var sb = new StringBuilder();
@@ -869,6 +930,31 @@ public static class SqlRender
         }
         sb.Append($"){BuildTableOptionsClause(table)};");
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// A column as it has to look while the rows are being loaded. A period column
+    /// loses its <c>GENERATED ALWAYS</c> and its <c>HIDDEN</c> and becomes a plain
+    /// <c>datetime2</c> of the same scale; every other column is unchanged.
+    /// </summary>
+    /// <remarks>
+    /// The column is rendered from a copy so the snapshot keeps the shape it was
+    /// extracted with — the same trick <see cref="TableRebuilder"/> uses. Clearing
+    /// <c>GeneratedAlwaysType</c> takes <c>HIDDEN</c> with it, because HIDDEN is only
+    /// ever rendered beside GENERATED ALWAYS. Nullability is forced off on top:
+    /// <c>ADD PERIOD</c> refuses a nullable period column (error 13587), a real
+    /// system-versioned table never has one, and NOT NULL here is what the source's
+    /// own column will be again a phase later.
+    /// </remarks>
+    private static string BuildDeferredPeriodColumn(ColumnModel column)
+    {
+        if(BuildGeneratedAlwaysClause(column) is null)
+            return BuildColumnDefinition(column);
+
+        var plain = column.Clone();
+        plain.GeneratedAlwaysType = 0;
+        plain.IsNullable = false;
+        return BuildColumnDefinition(plain);
     }
 
     /// <summary>

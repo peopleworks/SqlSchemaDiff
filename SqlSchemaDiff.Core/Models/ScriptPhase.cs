@@ -70,4 +70,27 @@ public sealed class ComposeOptions
     /// restore that loads rows is the one caller that wants it.
     /// </summary>
     public bool RestartSequences { get; init; }
+
+    /// <summary>
+    /// When false (the default), a table that declares a <c>SYSTEM_TIME</c> period
+    /// carries it inline in <c>CREATE TABLE</c>, which is what makes its two period
+    /// columns <c>GENERATED ALWAYS</c> — the shape a schema-only script wants, and
+    /// the only shape this engine emitted before 1.8.
+    /// <para>
+    /// When true, the tables phase emits those two columns as plain
+    /// <c>datetime2 NOT NULL</c> and the period itself moves to the finalize phase as
+    /// <c>ALTER TABLE ... ADD PERIOD FOR SYSTEM_TIME</c>, in front of the
+    /// <c>SYSTEM_VERSIONING = ON</c> that is already there. That is the shape a
+    /// restore wants: SQL Server refuses an INSERT that names a <c>GENERATED ALWAYS</c>
+    /// column (error 13536), so with the period inline every restored row is stamped
+    /// with the instant of the restore and the timeline between the end of the
+    /// archived history and that instant answers nothing.
+    /// </para>
+    /// </summary>
+    /// <remarks>
+    /// <c>ADD PERIOD</c> on a populated table enforces conditions the loaded rows have
+    /// to meet — see <see cref="Services.SqlRender.BuildPeriodAdd"/>, which lists the
+    /// ones measured against SQL Server 2025.
+    /// </remarks>
+    public bool PeriodAfterData { get; init; }
 }

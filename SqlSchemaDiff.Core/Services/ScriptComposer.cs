@@ -247,10 +247,17 @@ public static class ScriptComposer
         // rejected on one, so there is nothing left for the later phases to attach.
         var inlineKeysAndIndexes = table.IsMemoryOptimized;
 
+        // The period itself only moves when the caller asked for it. Turning versioning
+        // off was never enough on its own: the period alone is what makes the two
+        // columns GENERATED ALWAYS, and an INSERT that names one is refused whether or
+        // not versioning is on (error 13536) — so a restore that wants to keep the rows'
+        // own ValidFrom has to defer the period, not just the versioning.
+        var deferPeriod = options.PeriodAfterData && SqlRender.HasSystemTimePeriod(table);
+
         add(PhaseId.Tables, new ScriptBatch
         {
             Describe = $"Table {identifier}",
-            Sql = SqlRender.BuildTableCreateOnly(table),
+            Sql = SqlRender.BuildTableCreateOnly(table, deferPeriod),
 
             // A computed column can call a scalar function that only exists after
             // the modules phase, so the table may need a second attempt.
@@ -261,6 +268,18 @@ public static class ScriptComposer
         // for. SQL Server refuses to version a table with no primary key, and the key
         // is attached in a later phase; and a versioned table refuses an INSERT that
         // names its period columns, so a restore has to load its rows first as well.
+        // A deferred period lands in the same phase and in front of it: ADD PERIOD is
+        // the statement that converts the loaded columns to GENERATED ALWAYS, and
+        // SYSTEM_VERSIONING = ON has nothing to turn on until it has run.
+        if(deferPeriod && SqlRender.BuildPeriodAdd(table) is { } periodAdd)
+        {
+            add(PhaseId.Finalize, new ScriptBatch
+            {
+                Describe = $"Period for system time on {identifier}",
+                Sql = periodAdd
+            });
+        }
+
         if(SqlRender.IsSystemVersioned(table))
         {
             add(PhaseId.Finalize, new ScriptBatch
