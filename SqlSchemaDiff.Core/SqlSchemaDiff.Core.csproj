@@ -12,7 +12,7 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <Version>1.7.0</Version>
+    <Version>1.8.0</Version>
     <!-- The package carries the family name since 1.6.0; the assembly and the
          namespaces do not, so a consumer only changes its PackageReference. The
          1.5.0 ids SqlSchemaDiff.Core / SqlSchemaDiff.Cli are deprecated on nuget.org

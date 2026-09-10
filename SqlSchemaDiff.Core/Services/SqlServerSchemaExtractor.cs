@@ -1,13 +1,17 @@
+using System.Data;
 using Microsoft.Data.SqlClient;
 using SqlSchemaDiff.Models;
 
 namespace SqlSchemaDiff.Services;
 
 /// <summary>
-/// Reads a database's structure into a <see cref="DatabaseSnapshot"/>.
-/// Metadata is read with one set-based query per catalog view for the whole
-/// database and grouped in memory, so extraction costs a fixed number of round
-/// trips regardless of how many tables, indexes or constraints exist.
+/// Reads a database's structure into a <see cref="DatabaseSnapshot"/>, or one table
+/// of it into a <see cref="TableModel"/>.
+/// Metadata is read with one set-based query per catalog view and grouped in
+/// memory, so extraction costs a fixed number of round trips regardless of how many
+/// tables, indexes or constraints exist. Every one of those queries takes the same
+/// optional narrowing — see <see cref="CatalogScope"/> — so a per-table read runs
+/// the identical SQL against a single object instead of the whole catalog.
 /// </summary>
 public sealed class SqlServerSchemaExtractor
 {
@@ -30,58 +34,80 @@ public sealed class SqlServerSchemaExtractor
     /// <summary>Objects skipped or partially captured during extraction, with the reason.</summary>
     public List<string> Notices { get; } = new();
 
+    /// <summary>
+    /// Reads the whole database over a connection of this method's own, opened from
+    /// <paramref name="connectionString"/> and closed again before it returns.
+    /// </summary>
     public async Task<DatabaseSnapshot> ExtractAsync(string connectionString, CancellationToken cancellationToken)
     {
+        // Cleared here as well as in the overload below, so that a connection this
+        // method fails to open leaves no notices from a previous call behind.
         Notices.Clear();
 
         await using var connection = new SqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
+        return await ExtractAsync(connection, null, cancellationToken);
+    }
 
-        var databaseName = (await ExecuteScalarAsync(connection, "SELECT DB_NAME();", cancellationToken))?.ToString() ?? "UNKNOWN";
+    /// <summary>
+    /// Reads the whole database over an open connection the caller owns and, when one
+    /// is given, inside the caller's transaction.
+    /// <para>
+    /// The transaction is not decoration. A caller reading rows in one has no way to
+    /// hand it to the connection-string overload, so today its schema comes over a
+    /// second connection at a second point in time. Pass
+    /// <paramref name="transaction"/> whenever the connection has one — SqlClient
+    /// refuses a command with no transaction on a connection that has a pending local
+    /// one, so forgetting it fails loudly rather than quietly reading from outside.
+    /// </para>
+    /// <para>
+    /// What that does <b>not</b> buy is a versioned catalog, and it is worth being
+    /// exact about it. Measured on SQL Server 2025: inside a <c>SNAPSHOT</c>
+    /// transaction a concurrent <c>ALTER TABLE</c> still commits and this read sees
+    /// the new column immediately, because metadata is not versioned; what protects
+    /// the caller there is that its next <i>data</i> read fails with error 3961
+    /// instead of mixing an old snapshot with a new shape. Under <c>SERIALIZABLE</c>
+    /// the schema genuinely is pinned — the transaction's own reads hold the
+    /// schema-stability lock and the competing DDL blocks.
+    /// </para>
+    /// </summary>
+    public async Task<DatabaseSnapshot> ExtractAsync(
+        SqlConnection connection,
+        SqlTransaction? transaction,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
 
-        var tables = await GetTablesAsync(connection, cancellationToken);
-        var periods = await GetPeriodsAsync(connection, cancellationToken);
-        var columns = await GetColumnsAsync(connection, cancellationToken);
-        var indexColumns = await GetIndexColumnsAsync(connection, cancellationToken);
-        var compression = await GetDataCompressionAsync(connection, cancellationToken);
-        var keyConstraints = await GetKeyConstraintsAsync(connection, indexColumns, compression, cancellationToken);
-        var foreignKeys = await GetForeignKeysAsync(connection, cancellationToken);
-        var checkConstraints = await GetCheckConstraintsAsync(connection, cancellationToken);
-        var bucketCounts = await GetHashBucketCountsAsync(connection, cancellationToken);
-        var indexes = await GetIndexesAsync(connection, indexColumns, compression, bucketCounts, cancellationToken);
-        await ApplyKeyConstraintBucketCountsAsync(connection, keyConstraints, cancellationToken);
-        var sequences = await GetSequencesAsync(connection, cancellationToken);
-        var moduleDependencies = await GetModuleDependenciesAsync(connection, cancellationToken);
+        Notices.Clear();
+
+        var session = new CatalogSession(connection, transaction);
+        var scope = CatalogScope.Database;
+
+        var databaseName = (await ExecuteScalarAsync(session, "SELECT DB_NAME();", cancellationToken))?.ToString() ?? "UNKNOWN";
+
+        var tables = await GetTablesAsync(session, cancellationToken);
+        var periods = await GetPeriodsAsync(session, scope, cancellationToken);
+        var columns = await GetColumnsAsync(session, scope, cancellationToken);
+        var indexColumns = await GetIndexColumnsAsync(session, scope, cancellationToken);
+        var compression = await GetDataCompressionAsync(session, scope, cancellationToken);
+        var keyConstraints = await GetKeyConstraintsAsync(session, scope, indexColumns, compression, cancellationToken);
+        var foreignKeys = await GetForeignKeysAsync(session, scope, cancellationToken);
+        var checkConstraints = await GetCheckConstraintsAsync(session, scope, cancellationToken);
+        var bucketCounts = await GetHashBucketCountsAsync(session, scope, cancellationToken);
+        var indexes = await GetIndexesAsync(session, scope, indexColumns, compression, bucketCounts, cancellationToken);
+        await ApplyKeyConstraintBucketCountsAsync(session, scope, keyConstraints, cancellationToken);
+        var sequences = await GetSequencesAsync(session, cancellationToken);
+        var moduleDependencies = await GetModuleDependenciesAsync(session, cancellationToken);
 
         var objects = new List<DbSchemaObject>();
         objects.AddRange(sequences.Select(BuildSequenceObject));
-        objects.AddRange(await ExtractTableTypesAsync(connection, columns, keyConstraints, checkConstraints, cancellationToken));
-        objects.AddRange(await ExtractSynonymsAsync(connection, cancellationToken));
+        objects.AddRange(await ExtractTableTypesAsync(session, columns, keyConstraints, checkConstraints, cancellationToken));
+        objects.AddRange(await ExtractSynonymsAsync(session, cancellationToken));
 
         foreach(var table in tables)
         {
-            periods.TryGetValue(table.ObjectId, out var period);
-            var model = new TableModel
-            {
-                Schema = table.Schema,
-                Name = table.Name,
-                Columns = Take(columns, table.ObjectId),
-                KeyConstraints = Take(keyConstraints, table.ObjectId),
-                ForeignKeys = Take(foreignKeys, table.ObjectId),
-                CheckConstraints = Take(checkConstraints, table.ObjectId),
-                Indexes = Take(indexes, table.ObjectId),
-                // index_id 0 is a heap, 1 a clustered index; a table has exactly one
-                // of the two and its compression is the table's own.
-                DataCompression = LookupCompression(compression, table.ObjectId, 0)
-                                  ?? LookupCompression(compression, table.ObjectId, 1),
-                IsMemoryOptimized = table.IsMemoryOptimized,
-                Durability = table.IsMemoryOptimized ? table.DurabilityDesc : null,
-                TemporalType = table.TemporalTypeDesc,
-                HistoryTableSchema = table.HistorySchema,
-                HistoryTableName = table.HistoryName,
-                PeriodStartColumn = period.Start,
-                PeriodEndColumn = period.End
-            };
+            var model = BuildTableModel(
+                table, periods, columns, keyConstraints, foreignKeys, checkConstraints, indexes, compression);
 
             // A column default of NEXT VALUE FOR ties the table to a sequence that
             // must already exist. That edge is nowhere in the catalog's relational
@@ -108,10 +134,10 @@ public sealed class SqlServerSchemaExtractor
             });
         }
 
-        objects.AddRange(await ExtractProgrammableObjectsAsync(connection, moduleDependencies, cancellationToken));
-        objects.AddRange(await ExtractTriggersAsync(connection, tables, moduleDependencies, cancellationToken));
+        objects.AddRange(await ExtractProgrammableObjectsAsync(session, moduleDependencies, cancellationToken));
+        objects.AddRange(await ExtractTriggersAsync(session, tables, moduleDependencies, cancellationToken));
 
-        var allTypes = await GetAliasTypesAsync(connection, cancellationToken);
+        var allTypes = await GetAliasTypesAsync(session, cancellationToken);
         // Both tables and table types can have alias-typed columns, and either one
         // makes the alias type a prerequisite of the script.
         var usedTypeKeys = objects
@@ -146,38 +172,218 @@ public sealed class SqlServerSchemaExtractor
             DatabaseName = databaseName,
             GeneratedAtUtc = DateTimeOffset.UtcNow,
             Schemas = schemas,
-            SchemaOwners = await GetSchemaOwnersAsync(connection, schemas, cancellationToken),
+            SchemaOwners = await GetSchemaOwnersAsync(session, schemas, cancellationToken),
             Types = usedTypes,
             Objects = objects
         };
     }
 
+    // ------------------------------------------------------------ one table
+
+    /// <summary>
+    /// Reads one table into the same <see cref="TableModel"/> a whole-database
+    /// extract would have produced for it, over a connection of this method's own.
+    /// See the overload below for what the model contains and what it does not.
+    /// </summary>
+    public async Task<TableModel?> ExtractTableAsync(
+        string connectionString,
+        string schema,
+        string name,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(schema);
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        Notices.Clear();
+
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        return await ExtractTableAsync(connection, null, schema, name, cancellationToken);
+    }
+
+    /// <summary>
+    /// Reads one table into a <see cref="TableModel"/> identical to the one
+    /// <see cref="ExtractAsync(SqlConnection, SqlTransaction?, CancellationToken)"/>
+    /// would have built for it, at the cost of one table's worth of catalog reads
+    /// rather than the whole database's. Returns null when the connection's current
+    /// database has no such table.
+    /// <para>
+    /// Unlike the whole-database read, this returns a <b>history table</b> when one is
+    /// asked for by name. The skip in <see cref="GetTablesAsync"/> exists because a
+    /// history table cannot be scripted into a schema-diff plan — the
+    /// <c>SYSTEM_VERSIONING</c> clause on its parent creates it — but that is a
+    /// statement about scripting, not about the catalog. Its rows are data no other
+    /// object carries, and restoring them means creating the table first, which means
+    /// knowing its shape. Asking for a table by name is unambiguous, so no flag
+    /// guards it.
+    /// </para>
+    /// <para>
+    /// What a history table carries is the server's decision and is measured, not
+    /// derived from the parent: SQL Server drops the identity, the computed-ness (a
+    /// computed column becomes a real, materialised, nullable one), the
+    /// <c>GENERATED ALWAYS</c> kind, <c>HIDDEN</c>, <c>ROWGUIDCOL</c> and every
+    /// default, key, check and foreign key — and keeps the type (alias types
+    /// included), the collation, nullability and <c>SPARSE</c>. It also keeps a
+    /// <c>rowversion</c> column as <c>rowversion</c>, which no <c>INSERT</c> can
+    /// write: a caller restoring history has to script that column as
+    /// <c>binary(8)</c> itself.
+    /// </para>
+    /// <para>
+    /// The model is the table alone. An alias type one of its columns uses, or a
+    /// table its foreign keys point at, are prerequisites this does not return —
+    /// <see cref="ExtractAsync(SqlConnection, SqlTransaction?, CancellationToken)"/>
+    /// is what collects those. <see cref="Notices"/> is cleared and refilled with
+    /// whatever this one table produced.
+    /// </para>
+    /// </summary>
+    /// <param name="connection">An open connection. Its current database is the one read; there is no cross-database form.</param>
+    /// <param name="transaction">The connection's pending transaction, or null. See the whole-database overload for why it matters.</param>
+    /// <param name="schema">The schema name, unquoted and unparsed — <c>dbo</c>, never <c>[dbo]</c>. Matched by the database's own collation, exactly as <c>OBJECT_ID</c> would.</param>
+    /// <param name="name">The table name, on the same terms. A view, a table type or a name that does not exist all give null.</param>
+    public async Task<TableModel?> ExtractTableAsync(
+        SqlConnection connection,
+        SqlTransaction? transaction,
+        string schema,
+        string name,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentException.ThrowIfNullOrWhiteSpace(schema);
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+
+        Notices.Clear();
+
+        var session = new CatalogSession(connection, transaction);
+
+        var table = await GetTableAsync(session, schema, name, cancellationToken);
+        if(table is null)
+            return null;
+
+        var scope = CatalogScope.Object(table.ObjectId);
+
+        var periods = await GetPeriodsAsync(session, scope, cancellationToken);
+        var columns = await GetColumnsAsync(session, scope, cancellationToken);
+        var indexColumns = await GetIndexColumnsAsync(session, scope, cancellationToken);
+        var compression = await GetDataCompressionAsync(session, scope, cancellationToken);
+        var keyConstraints = await GetKeyConstraintsAsync(session, scope, indexColumns, compression, cancellationToken);
+        var foreignKeys = await GetForeignKeysAsync(session, scope, cancellationToken);
+        var checkConstraints = await GetCheckConstraintsAsync(session, scope, cancellationToken);
+
+        // Only a memory-optimized table can have a hash index, so on every other table
+        // these two queries are two round trips that provably return nothing.
+        var bucketCounts = table.IsMemoryOptimized
+            ? await GetHashBucketCountsAsync(session, scope, cancellationToken)
+            : new Dictionary<(int ObjectId, int IndexId), int>();
+
+        var indexes = await GetIndexesAsync(session, scope, indexColumns, compression, bucketCounts, cancellationToken);
+
+        if(table.IsMemoryOptimized)
+            await ApplyKeyConstraintBucketCountsAsync(session, scope, keyConstraints, cancellationToken);
+
+        return BuildTableModel(
+            table, periods, columns, keyConstraints, foreignKeys, checkConstraints, indexes, compression);
+    }
+
+    /// <summary>
+    /// The one place a <see cref="TableModel"/> is assembled, so the whole-database
+    /// read and the per-table one cannot drift: a property added here reaches both.
+    /// </summary>
+    private static TableModel BuildTableModel(
+        TableInfo table,
+        Dictionary<int, (string? Start, string? End)> periods,
+        ILookup<int, ColumnModel> columns,
+        ILookup<int, KeyConstraintModel> keyConstraints,
+        ILookup<int, ForeignKeyModel> foreignKeys,
+        ILookup<int, CheckConstraintModel> checkConstraints,
+        ILookup<int, IndexModel> indexes,
+        Dictionary<(int ObjectId, int IndexId), string> compression)
+    {
+        periods.TryGetValue(table.ObjectId, out var period);
+        return new TableModel
+        {
+            Schema = table.Schema,
+            Name = table.Name,
+            Columns = Take(columns, table.ObjectId),
+            KeyConstraints = Take(keyConstraints, table.ObjectId),
+            ForeignKeys = Take(foreignKeys, table.ObjectId),
+            CheckConstraints = Take(checkConstraints, table.ObjectId),
+            Indexes = Take(indexes, table.ObjectId),
+            // index_id 0 is a heap, 1 a clustered index; a table has exactly one
+            // of the two and its compression is the table's own.
+            DataCompression = LookupCompression(compression, table.ObjectId, 0)
+                              ?? LookupCompression(compression, table.ObjectId, 1),
+            IsMemoryOptimized = table.IsMemoryOptimized,
+            Durability = table.IsMemoryOptimized ? table.DurabilityDesc : null,
+            TemporalType = table.TemporalTypeDesc,
+            HistoryTableSchema = table.HistorySchema,
+            HistoryTableName = table.HistoryName,
+            PeriodStartColumn = period.Start,
+            PeriodEndColumn = period.End
+        };
+    }
+
     // ---------------------------------------------------------------- tables
 
-    private async Task<List<TableInfo>> GetTablesAsync(SqlConnection connection, CancellationToken cancellationToken)
+    /// <summary>
+    /// Everything <see cref="TableInfo"/> is built from. Shared by the whole-database
+    /// reader and the per-table one so a column added to the projection reaches both,
+    /// and so the two cannot disagree about what a table is.
+    /// </summary>
+    private const string TableSelect = """
+                                       SELECT
+                                           t.object_id,
+                                           s.name AS schema_name,
+                                           t.name,
+                                           t.temporal_type,
+                                           t.temporal_type_desc,
+                                           hs.name AS history_schema,
+                                           ht.name AS history_name,
+                                           t.is_memory_optimized,
+                                           t.durability_desc
+                                       FROM sys.tables t
+                                       INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
+                                       LEFT JOIN sys.tables ht ON ht.object_id = t.history_table_id
+                                       LEFT JOIN sys.schemas hs ON hs.schema_id = ht.schema_id
+                                       WHERE t.is_ms_shipped = 0
+                                       """;
+
+    /// <summary>
+    /// The one table named, history table or not, or null when the current database
+    /// has none. The names are compared by the database's collation, which is what
+    /// <c>OBJECT_ID</c> does too, so a case-sensitive database is case-sensitive here.
+    /// </summary>
+    private async Task<TableInfo?> GetTableAsync(
+        CatalogSession session, string schema, string name, CancellationToken cancellationToken)
     {
-        const string sql = """
-                           SELECT
-                               t.object_id,
-                               s.name AS schema_name,
-                               t.name,
-                               t.temporal_type,
-                               t.temporal_type_desc,
-                               hs.name AS history_schema,
-                               ht.name AS history_name,
-                               t.is_memory_optimized,
-                               t.durability_desc
-                           FROM sys.tables t
-                           INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-                           LEFT JOIN sys.tables ht ON ht.object_id = t.history_table_id
-                           LEFT JOIN sys.schemas hs ON hs.schema_id = ht.schema_id
-                           WHERE t.is_ms_shipped = 0
-                           ORDER BY s.name, t.name;
-                           """;
+        const string sql = $"""
+                            {TableSelect}
+                              AND s.name = @schema
+                              AND t.name = @name;
+                            """;
+
+        await using var command = session.CreateCommand(sql);
+        command.Parameters.Add("@schema", SqlDbType.NVarChar, 128).Value = schema;
+        command.Parameters.Add("@name", SqlDbType.NVarChar, 128).Value = name;
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if(!await reader.ReadAsync(cancellationToken))
+            return null;
+
+        var table = ReadTableInfo(reader);
+        if(table.IsMemoryOptimized)
+            AddMemoryOptimizedNotice(table.Schema, table.Name);
+
+        return table;
+    }
+
+    private async Task<List<TableInfo>> GetTablesAsync(CatalogSession session, CancellationToken cancellationToken)
+    {
+        const string sql = $"""
+                            {TableSelect}
+                            ORDER BY s.name, t.name;
+                            """;
 
         var tables = new List<TableInfo>();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
         {
@@ -195,30 +401,40 @@ public sealed class SqlServerSchemaExtractor
                 continue;
             }
 
-            // Everything about a memory-optimized table is scripted since 1.7 except
-            // the one thing no snapshot can know: the filegroup, which names a path on
-            // the server's own disk. The script says so too; this is the machine-
-            // readable half of the same sentence.
-            var isMemoryOptimized = reader.GetBoolean(7);
-            if(isMemoryOptimized)
-            {
-                Notices.Add($"[{schema}].[{name}] is memory-optimized; the target database must already have " +
-                            "a filegroup CONTAINS MEMORY_OPTIMIZED_DATA, which cannot be scripted");
-            }
+            var table = ReadTableInfo(reader);
+            if(table.IsMemoryOptimized)
+                AddMemoryOptimizedNotice(schema, name);
 
-            // NON_TEMPORAL is stored as null so an ordinary table carries nothing new
-            // in its snapshot and keeps comparing equal to one taken by an older build.
-            tables.Add(new TableInfo(
-                reader.GetInt32(0), schema, name,
-                temporalType == 0 ? null : reader.GetString(4),
-                reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6),
-                isMemoryOptimized,
-                reader.IsDBNull(8) ? null : reader.GetString(8)));
+            tables.Add(table);
         }
 
         return tables;
     }
+
+    /// <summary>
+    /// One row of <see cref="TableSelect"/>. <c>NON_TEMPORAL</c> is stored as null so
+    /// an ordinary table carries nothing new in its snapshot and keeps comparing equal
+    /// to one taken by an older build.
+    /// </summary>
+    private static TableInfo ReadTableInfo(SqlDataReader reader) => new(
+        reader.GetInt32(0),
+        reader.GetString(1),
+        reader.GetString(2),
+        reader.GetByte(3) == 0 ? null : reader.GetString(4),
+        reader.IsDBNull(5) ? null : reader.GetString(5),
+        reader.IsDBNull(6) ? null : reader.GetString(6),
+        reader.GetBoolean(7),
+        reader.IsDBNull(8) ? null : reader.GetString(8));
+
+    /// <summary>
+    /// Everything about a memory-optimized table is scripted since 1.7 except the one
+    /// thing no snapshot can know: the filegroup, which names a path on the server's
+    /// own disk. The script says so too; this is the machine-readable half of the same
+    /// sentence.
+    /// </summary>
+    private void AddMemoryOptimizedNotice(string schema, string name) =>
+        Notices.Add($"[{schema}].[{name}] is memory-optimized; the target database must already have " +
+                    "a filegroup CONTAINS MEMORY_OPTIMIZED_DATA, which cannot be scripted");
 
     /// <summary>
     /// The SYSTEM_TIME period columns of every temporal table, which is what
@@ -227,22 +443,21 @@ public sealed class SqlServerSchemaExtractor
     /// for the versioned ones.
     /// </summary>
     private static async Task<Dictionary<int, (string? Start, string? End)>> GetPeriodsAsync(
-        SqlConnection connection, CancellationToken cancellationToken)
+        CatalogSession session, CatalogScope scope, CancellationToken cancellationToken)
     {
-        const string sql = """
+        var sql = $"""
                            SELECT
                                p.object_id,
                                sc.name AS start_column,
                                ec.name AS end_column
                            FROM sys.periods p
-                           INNER JOIN sys.tables t ON t.object_id = p.object_id AND t.is_ms_shipped = 0
+                           INNER JOIN sys.tables t ON t.object_id = p.object_id AND t.is_ms_shipped = 0 {scope.Filter("p.object_id")}
                            INNER JOIN sys.columns sc ON sc.object_id = p.object_id AND sc.column_id = p.start_column_id
                            INNER JOIN sys.columns ec ON ec.object_id = p.object_id AND ec.column_id = p.end_column_id;
                            """;
 
         var result = new Dictionary<int, (string? Start, string? End)>();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql, scope);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
             result[reader.GetInt32(0)] = (reader.GetString(1), reader.GetString(2));
@@ -250,9 +465,10 @@ public sealed class SqlServerSchemaExtractor
         return result;
     }
 
-    private static async Task<ILookup<int, ColumnModel>> GetColumnsAsync(SqlConnection connection, CancellationToken cancellationToken)
+    private static async Task<ILookup<int, ColumnModel>> GetColumnsAsync(
+        CatalogSession session, CatalogScope scope, CancellationToken cancellationToken)
     {
-        const string sql = $"""
+        var sql = $"""
                            SELECT
                                c.object_id,
                                c.name,
@@ -278,7 +494,7 @@ public sealed class SqlServerSchemaExtractor
                                c.generated_always_type,
                                c.is_hidden
                            FROM sys.columns c
-                           INNER JOIN {ColumnOwners} owner ON owner.object_id = c.object_id
+                           INNER JOIN {ColumnOwners} owner ON owner.object_id = c.object_id {scope.Filter("c.object_id")}
                            INNER JOIN sys.types ty ON c.user_type_id = ty.user_type_id
                            INNER JOIN sys.schemas ts ON ts.schema_id = ty.schema_id
                            LEFT JOIN sys.computed_columns cc ON cc.object_id = c.object_id AND cc.column_id = c.column_id
@@ -288,8 +504,7 @@ public sealed class SqlServerSchemaExtractor
                            """;
 
         var rows = new List<(int ObjectId, ColumnModel Model)>();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql, scope);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
         {
@@ -326,12 +541,13 @@ public sealed class SqlServerSchemaExtractor
     // ----------------------------------------------------------- constraints
 
     private static async Task<ILookup<int, KeyConstraintModel>> GetKeyConstraintsAsync(
-        SqlConnection connection,
+        CatalogSession session,
+        CatalogScope scope,
         Dictionary<(int ObjectId, int IndexId), List<IndexColumnModel>> indexColumns,
         Dictionary<(int ObjectId, int IndexId), string> compression,
         CancellationToken cancellationToken)
     {
-        const string sql = $"""
+        var sql = $"""
                            SELECT
                                kc.parent_object_id,
                                kc.name,
@@ -345,7 +561,7 @@ public sealed class SqlServerSchemaExtractor
                                i.allow_row_locks,
                                i.allow_page_locks
                            FROM sys.key_constraints kc
-                           INNER JOIN {ColumnOwners} owner ON owner.object_id = kc.parent_object_id
+                           INNER JOIN {ColumnOwners} owner ON owner.object_id = kc.parent_object_id {scope.Filter("kc.parent_object_id")}
                            INNER JOIN sys.indexes i
                                ON i.object_id = kc.parent_object_id
                               AND i.index_id = kc.unique_index_id
@@ -353,8 +569,7 @@ public sealed class SqlServerSchemaExtractor
                            """;
 
         var rows = new List<(int ObjectId, KeyConstraintModel Model)>();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql, scope);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
         {
@@ -379,9 +594,10 @@ public sealed class SqlServerSchemaExtractor
         return rows.ToLookup(x => x.ObjectId, x => x.Model);
     }
 
-    private static async Task<ILookup<int, ForeignKeyModel>> GetForeignKeysAsync(SqlConnection connection, CancellationToken cancellationToken)
+    private static async Task<ILookup<int, ForeignKeyModel>> GetForeignKeysAsync(
+        CatalogSession session, CatalogScope scope, CancellationToken cancellationToken)
     {
-        const string sql = """
+        var sql = $"""
                            SELECT
                                fk.parent_object_id,
                                fk.object_id,
@@ -395,16 +611,15 @@ public sealed class SqlServerSchemaExtractor
                                fk.is_disabled,
                                fk.is_system_named
                            FROM sys.foreign_keys fk
-                           INNER JOIN sys.tables t ON t.object_id = fk.parent_object_id AND t.is_ms_shipped = 0
+                           INNER JOIN sys.tables t ON t.object_id = fk.parent_object_id AND t.is_ms_shipped = 0 {scope.Filter("fk.parent_object_id")}
                            INNER JOIN sys.tables rt ON rt.object_id = fk.referenced_object_id
                            INNER JOIN sys.schemas rs ON rs.schema_id = rt.schema_id
                            ORDER BY fk.parent_object_id, fk.name;
                            """;
 
         var rows = new List<(int ObjectId, int FkObjectId, ForeignKeyModel Model)>();
-        await using(var command = connection.CreateCommand())
+        await using(var command = session.CreateCommand(sql, scope))
         {
-            command.CommandText = sql;
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while(await reader.ReadAsync(cancellationToken))
             {
@@ -423,16 +638,17 @@ public sealed class SqlServerSchemaExtractor
             }
         }
 
-        var columnsByFk = await GetForeignKeyColumnsAsync(connection, cancellationToken);
+        var columnsByFk = await GetForeignKeyColumnsAsync(session, scope, cancellationToken);
         foreach(var row in rows)
             row.Model.Columns = columnsByFk[row.FkObjectId].ToList();
 
         return rows.ToLookup(x => x.ObjectId, x => x.Model);
     }
 
-    private static async Task<ILookup<int, ForeignKeyColumnModel>> GetForeignKeyColumnsAsync(SqlConnection connection, CancellationToken cancellationToken)
+    private static async Task<ILookup<int, ForeignKeyColumnModel>> GetForeignKeyColumnsAsync(
+        CatalogSession session, CatalogScope scope, CancellationToken cancellationToken)
     {
-        const string sql = """
+        var sql = $"""
                            SELECT
                                fkc.constraint_object_id,
                                pc.name AS parent_column,
@@ -440,7 +656,7 @@ public sealed class SqlServerSchemaExtractor
                            FROM sys.foreign_key_columns fkc
                            INNER JOIN sys.columns pc
                                ON pc.object_id = fkc.parent_object_id
-                              AND pc.column_id = fkc.parent_column_id
+                              AND pc.column_id = fkc.parent_column_id {scope.Filter("fkc.parent_object_id")}
                            INNER JOIN sys.columns rc
                                ON rc.object_id = fkc.referenced_object_id
                               AND rc.column_id = fkc.referenced_column_id
@@ -448,8 +664,7 @@ public sealed class SqlServerSchemaExtractor
                            """;
 
         var rows = new List<(int FkObjectId, ForeignKeyColumnModel Model)>();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql, scope);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
         {
@@ -463,9 +678,10 @@ public sealed class SqlServerSchemaExtractor
         return rows.ToLookup(x => x.FkObjectId, x => x.Model);
     }
 
-    private static async Task<ILookup<int, CheckConstraintModel>> GetCheckConstraintsAsync(SqlConnection connection, CancellationToken cancellationToken)
+    private static async Task<ILookup<int, CheckConstraintModel>> GetCheckConstraintsAsync(
+        CatalogSession session, CatalogScope scope, CancellationToken cancellationToken)
     {
-        const string sql = $"""
+        var sql = $"""
                            SELECT
                                cc.parent_object_id,
                                cc.name,
@@ -474,13 +690,12 @@ public sealed class SqlServerSchemaExtractor
                                cc.is_disabled,
                                cc.is_system_named
                            FROM sys.check_constraints cc
-                           INNER JOIN {ColumnOwners} owner ON owner.object_id = cc.parent_object_id
+                           INNER JOIN {ColumnOwners} owner ON owner.object_id = cc.parent_object_id {scope.Filter("cc.parent_object_id")}
                            ORDER BY cc.parent_object_id, cc.name;
                            """;
 
         var rows = new List<(int ObjectId, CheckConstraintModel Model)>();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql, scope);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
         {
@@ -500,13 +715,14 @@ public sealed class SqlServerSchemaExtractor
     // --------------------------------------------------------------- indexes
 
     private async Task<ILookup<int, IndexModel>> GetIndexesAsync(
-        SqlConnection connection,
+        CatalogSession session,
+        CatalogScope scope,
         Dictionary<(int ObjectId, int IndexId), List<IndexColumnModel>> indexColumns,
         Dictionary<(int ObjectId, int IndexId), string> compression,
         Dictionary<(int ObjectId, int IndexId), int> bucketCounts,
         CancellationToken cancellationToken)
     {
-        const string sql = """
+        var sql = $"""
                            SELECT
                                i.object_id,
                                i.index_id,
@@ -524,7 +740,7 @@ public sealed class SqlServerSchemaExtractor
                                i.allow_row_locks,
                                i.allow_page_locks
                            FROM sys.indexes i
-                           INNER JOIN sys.tables t ON t.object_id = i.object_id AND t.is_ms_shipped = 0
+                           INNER JOIN sys.tables t ON t.object_id = i.object_id AND t.is_ms_shipped = 0 {scope.Filter("i.object_id")}
                            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
                            WHERE i.is_hypothetical = 0
                              AND i.name IS NOT NULL
@@ -534,8 +750,7 @@ public sealed class SqlServerSchemaExtractor
                            """;
 
         var rows = new List<(int ObjectId, IndexModel Model)>();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql, scope);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
         {
@@ -586,17 +801,16 @@ public sealed class SqlServerSchemaExtractor
     /// like every other per-index property.
     /// </summary>
     private static async Task<Dictionary<(int ObjectId, int IndexId), int>> GetHashBucketCountsAsync(
-        SqlConnection connection, CancellationToken cancellationToken)
+        CatalogSession session, CatalogScope scope, CancellationToken cancellationToken)
     {
-        const string sql = """
+        var sql = $"""
                            SELECT h.object_id, h.index_id, h.bucket_count
                            FROM sys.hash_indexes h
-                           INNER JOIN sys.tables t ON t.object_id = h.object_id AND t.is_ms_shipped = 0;
+                           INNER JOIN sys.tables t ON t.object_id = h.object_id AND t.is_ms_shipped = 0 {scope.Filter("h.object_id")};
                            """;
 
         var result = new Dictionary<(int, int), int>();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql, scope);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
             result[(reader.GetInt32(0), reader.GetInt32(1))] = reader.GetInt32(2);
@@ -611,20 +825,20 @@ public sealed class SqlServerSchemaExtractor
     /// value straight onto the models the key-constraint pass already built.
     /// </summary>
     private static async Task ApplyKeyConstraintBucketCountsAsync(
-        SqlConnection connection,
+        CatalogSession session,
+        CatalogScope scope,
         ILookup<int, KeyConstraintModel> keyConstraints,
         CancellationToken cancellationToken)
     {
-        const string sql = """
+        var sql = $"""
                            SELECT kc.parent_object_id, kc.name, h.bucket_count
                            FROM sys.key_constraints kc
                            INNER JOIN sys.hash_indexes h
                                ON h.object_id = kc.parent_object_id
-                              AND h.index_id = kc.unique_index_id;
+                              AND h.index_id = kc.unique_index_id {scope.Filter("kc.parent_object_id")};
                            """;
 
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql, scope);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
         {
@@ -640,9 +854,10 @@ public sealed class SqlServerSchemaExtractor
         }
     }
 
-    private static async Task<Dictionary<(int, int), List<IndexColumnModel>>> GetIndexColumnsAsync(SqlConnection connection, CancellationToken cancellationToken)
+    private static async Task<Dictionary<(int, int), List<IndexColumnModel>>> GetIndexColumnsAsync(
+        CatalogSession session, CatalogScope scope, CancellationToken cancellationToken)
     {
-        const string sql = $"""
+        var sql = $"""
                            SELECT
                                ic.object_id,
                                ic.index_id,
@@ -652,7 +867,7 @@ public sealed class SqlServerSchemaExtractor
                                ic.is_included_column,
                                ic.index_column_id
                            FROM sys.index_columns ic
-                           INNER JOIN {ColumnOwners} owner ON owner.object_id = ic.object_id
+                           INNER JOIN {ColumnOwners} owner ON owner.object_id = ic.object_id {scope.Filter("ic.object_id")}
                            INNER JOIN sys.columns c
                                ON c.object_id = ic.object_id
                               AND c.column_id = ic.column_id
@@ -660,8 +875,7 @@ public sealed class SqlServerSchemaExtractor
                            """;
 
         var result = new Dictionary<(int, int), List<IndexColumnModel>>();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql, scope);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
         {
@@ -691,21 +905,20 @@ public sealed class SqlServerSchemaExtractor
     /// a single unqualified DATA_COMPRESSION and a partition scheme is out of scope.
     /// </summary>
     private static async Task<Dictionary<(int ObjectId, int IndexId), string>> GetDataCompressionAsync(
-        SqlConnection connection, CancellationToken cancellationToken)
+        CatalogSession session, CatalogScope scope, CancellationToken cancellationToken)
     {
-        const string sql = """
+        var sql = $"""
                            SELECT
                                p.object_id,
                                p.index_id,
                                p.data_compression_desc
                            FROM sys.partitions p
-                           INNER JOIN sys.tables t ON t.object_id = p.object_id AND t.is_ms_shipped = 0
+                           INNER JOIN sys.tables t ON t.object_id = p.object_id AND t.is_ms_shipped = 0 {scope.Filter("p.object_id")}
                            WHERE p.partition_number = 1;
                            """;
 
         var result = new Dictionary<(int ObjectId, int IndexId), string>();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql, scope);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
         {
@@ -729,7 +942,7 @@ public sealed class SqlServerSchemaExtractor
 
     // ----------------------------------------------------------- alias types
 
-    private static async Task<List<AliasTypeModel>> GetAliasTypesAsync(SqlConnection connection, CancellationToken cancellationToken)
+    private static async Task<List<AliasTypeModel>> GetAliasTypesAsync(CatalogSession session, CancellationToken cancellationToken)
     {
         const string sql = """
                            SELECT
@@ -753,8 +966,7 @@ public sealed class SqlServerSchemaExtractor
                            """;
 
         var result = new List<AliasTypeModel>();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
         {
@@ -777,7 +989,7 @@ public sealed class SqlServerSchemaExtractor
     // -------------------------------------------------- programmable objects
 
     private static async Task<List<DbSchemaObject>> ExtractProgrammableObjectsAsync(
-        SqlConnection connection,
+        CatalogSession session,
         Dictionary<int, List<string>> dependencyMap,
         CancellationToken cancellationToken)
     {
@@ -811,8 +1023,7 @@ public sealed class SqlServerSchemaExtractor
                            """;
 
         var result = new List<DbSchemaObject>();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
@@ -848,7 +1059,7 @@ public sealed class SqlServerSchemaExtractor
     /// What each module (view, procedure, function or trigger) references, as
     /// <see cref="DbSchemaObject.Key"/> values.
     /// </summary>
-    private static async Task<Dictionary<int, List<string>>> GetModuleDependenciesAsync(SqlConnection connection, CancellationToken cancellationToken)
+    private static async Task<Dictionary<int, List<string>>> GetModuleDependenciesAsync(CatalogSession session, CancellationToken cancellationToken)
     {
         const string referencingModules = """
                                           SELECT object_id
@@ -901,9 +1112,8 @@ public sealed class SqlServerSchemaExtractor
 
         var map = new Dictionary<int, HashSet<string>>();
 
-        await using(var command = connection.CreateCommand())
+        await using(var command = session.CreateCommand(objectSql))
         {
-            command.CommandText = objectSql;
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while(await reader.ReadAsync(cancellationToken))
             {
@@ -912,9 +1122,8 @@ public sealed class SqlServerSchemaExtractor
             }
         }
 
-        await using(var command = connection.CreateCommand())
+        await using(var command = session.CreateCommand(typeSql))
         {
-            command.CommandText = typeSql;
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while(await reader.ReadAsync(cancellationToken))
             {
@@ -963,7 +1172,7 @@ public sealed class SqlServerSchemaExtractor
     /// carrying them into another database is a policy decision, not a schema one.
     /// </summary>
     private async Task<List<DbSchemaObject>> ExtractTriggersAsync(
-        SqlConnection connection,
+        CatalogSession session,
         IReadOnlyCollection<TableInfo> tables,
         Dictionary<int, List<string>> dependencyMap,
         CancellationToken cancellationToken)
@@ -993,8 +1202,7 @@ public sealed class SqlServerSchemaExtractor
         var capturedTables = tables.Select(x => x.ObjectId).ToHashSet();
 
         var result = new List<DbSchemaObject>();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
@@ -1050,7 +1258,7 @@ public sealed class SqlServerSchemaExtractor
 
     // --------------------------------------------------------------- sequences
 
-    private static async Task<List<SequenceModel>> GetSequencesAsync(SqlConnection connection, CancellationToken cancellationToken)
+    private static async Task<List<SequenceModel>> GetSequencesAsync(CatalogSession session, CancellationToken cancellationToken)
     {
         // start_value, increment, minimum_value, maximum_value and current_value are
         // sql_variant. They are converted to text in the server rather than boxed and
@@ -1077,8 +1285,7 @@ public sealed class SqlServerSchemaExtractor
                            """;
 
         var result = new List<SequenceModel>();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
         {
@@ -1115,7 +1322,7 @@ public sealed class SqlServerSchemaExtractor
     // ------------------------------------------------------------- table types
 
     private async Task<List<DbSchemaObject>> ExtractTableTypesAsync(
-        SqlConnection connection,
+        CatalogSession session,
         ILookup<int, ColumnModel> columns,
         ILookup<int, KeyConstraintModel> keyConstraints,
         ILookup<int, CheckConstraintModel> checkConstraints,
@@ -1134,11 +1341,10 @@ public sealed class SqlServerSchemaExtractor
                            ORDER BY s.name, tt.name;
                            """;
 
-        var withUnscriptedIndexes = await GetTableTypesWithInlineIndexesAsync(connection, cancellationToken);
+        var withUnscriptedIndexes = await GetTableTypesWithInlineIndexesAsync(session, cancellationToken);
 
         var result = new List<DbSchemaObject>();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
@@ -1180,7 +1386,7 @@ public sealed class SqlServerSchemaExtractor
     /// Table types whose definition carries an <c>INDEX</c> clause that is not backing
     /// a key constraint. Those are not rendered, so they are reported instead.
     /// </summary>
-    private static async Task<HashSet<int>> GetTableTypesWithInlineIndexesAsync(SqlConnection connection, CancellationToken cancellationToken)
+    private static async Task<HashSet<int>> GetTableTypesWithInlineIndexesAsync(CatalogSession session, CancellationToken cancellationToken)
     {
         const string sql = """
                            SELECT DISTINCT i.object_id
@@ -1194,8 +1400,7 @@ public sealed class SqlServerSchemaExtractor
                            """;
 
         var result = new HashSet<int>();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
             result.Add(reader.GetInt32(0));
@@ -1215,7 +1420,7 @@ public sealed class SqlServerSchemaExtractor
     /// </para>
     /// </summary>
     private static async Task<List<DbSchemaObject>> ExtractSynonymsAsync(
-        SqlConnection connection,
+        CatalogSession session,
         CancellationToken cancellationToken)
     {
         const string sql = """
@@ -1230,8 +1435,7 @@ public sealed class SqlServerSchemaExtractor
                            """;
 
         var result = new List<DbSchemaObject>();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
         {
@@ -1258,7 +1462,7 @@ public sealed class SqlServerSchemaExtractor
     // ----------------------------------------------------------- schema owners
 
     private static async Task<Dictionary<string, string>?> GetSchemaOwnersAsync(
-        SqlConnection connection,
+        CatalogSession session,
         IReadOnlyCollection<string> schemas,
         CancellationToken cancellationToken)
     {
@@ -1278,8 +1482,7 @@ public sealed class SqlServerSchemaExtractor
         var wanted = new HashSet<string>(schemas, StringComparer.OrdinalIgnoreCase);
         var owners = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while(await reader.ReadAsync(cancellationToken))
         {
@@ -1316,10 +1519,9 @@ public sealed class SqlServerSchemaExtractor
     private static string BuildKey(DbObjectType type, string schema, string name) =>
         DbSchemaObject.BuildKey(type, schema, name);
 
-    private static async Task<object?> ExecuteScalarAsync(SqlConnection connection, string sql, CancellationToken cancellationToken)
+    private static async Task<object?> ExecuteScalarAsync(CatalogSession session, string sql, CancellationToken cancellationToken)
     {
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
+        await using var command = session.CreateCommand(sql);
         return await command.ExecuteScalarAsync(cancellationToken);
     }
 
@@ -1327,4 +1529,65 @@ public sealed class SqlServerSchemaExtractor
         int ObjectId, string Schema, string Name,
         string? TemporalTypeDesc, string? HistorySchema, string? HistoryName,
         bool IsMemoryOptimized, string? DurabilityDesc);
+
+    /// <summary>
+    /// Where the catalog queries run: an open connection and, when the caller has
+    /// one, the transaction that connection is inside.
+    /// <para>
+    /// The transaction is not an optimisation. SqlClient refuses to run a command
+    /// with no <see cref="SqlCommand.Transaction"/> on a connection that has a pending
+    /// local one, so a caller reading rows under snapshot isolation either hands the
+    /// transaction over — and gets a schema from the same instant as the data — or
+    /// gets an exception. What it never gets is a schema quietly read from outside
+    /// its own snapshot.
+    /// </para>
+    /// </summary>
+    private readonly record struct CatalogSession(SqlConnection Connection, SqlTransaction? Transaction)
+    {
+        public SqlCommand CreateCommand(string sql) => CreateCommand(sql, CatalogScope.Database);
+
+        public SqlCommand CreateCommand(string sql, CatalogScope scope)
+        {
+            var command = Connection.CreateCommand();
+            command.CommandText = sql;
+            command.Transaction = Transaction;
+            scope.Bind(command);
+            return command;
+        }
+    }
+
+    /// <summary>
+    /// How much of the catalog one query is asked for: the whole database, or the
+    /// single object a per-table read needs.
+    /// <para>
+    /// Every reader takes one of these and appends <see cref="Filter"/> to a join it
+    /// already has, so the two extraction paths run the <b>same</b> SQL with one extra
+    /// predicate rather than two hand-maintained sets of queries that could disagree
+    /// about what a column is. <see cref="Database"/> renders to nothing at all and
+    /// binds no parameter, so the whole-database text is what it always was.
+    /// </para>
+    /// </summary>
+    internal readonly record struct CatalogScope(int? ObjectId)
+    {
+        private const string ParameterName = "@object_id";
+
+        /// <summary>Everything the query would have returned anyway.</summary>
+        public static CatalogScope Database => new((int?)null);
+
+        /// <summary>One object, by <c>sys.objects.object_id</c>.</summary>
+        public static CatalogScope Object(int objectId) => new(objectId);
+
+        /// <summary>
+        /// The extra predicate, to be appended to an <c>ON</c> clause the query already
+        /// has. Empty for <see cref="Database"/>.
+        /// </summary>
+        /// <param name="column">The qualified column holding the owning object's id in that query.</param>
+        public string Filter(string column) => ObjectId is null ? string.Empty : $"AND {column} = {ParameterName}";
+
+        public void Bind(SqlCommand command)
+        {
+            if(ObjectId is { } objectId)
+                command.Parameters.Add(ParameterName, SqlDbType.Int).Value = objectId;
+        }
+    }
 }
