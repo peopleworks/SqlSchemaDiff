@@ -4,6 +4,58 @@ All notable changes to SQLDiff are recorded here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-09-10
+
+Everything here exists because a database restored from an archive was losing the history of
+its temporal tables, and because publishing one table was costing a read of the whole catalog.
+Both were measured against SQL Server 2025 before anything was written.
+
+### Added
+
+- **`ComposeOptions.PeriodAfterData`.** A from-scratch script that is going to have rows loaded
+  into it cannot declare `PERIOD FOR SYSTEM_TIME` inside `CREATE TABLE`: the period makes the two
+  columns `GENERATED ALWAYS`, and SQL Server refuses an `INSERT` that names one — error 13536,
+  and it refuses it **with versioning already off**, so turning versioning off is not a way
+  round it. The consequence was a hole: after a restore, `FOR SYSTEM_TIME AS OF` any instant
+  between the end of the archived history and the restore itself returned nothing at all, because
+  every current row had been stamped with the moment it was loaded. With this option on, the
+  tables phase emits the period columns as plain `datetime2 NOT NULL` and the finalize phase
+  issues `ALTER TABLE … ADD PERIOD FOR SYSTEM_TIME` — which converts them in place, keeping the
+  values already in them — followed by `ADD HIDDEN` for each hidden column and then the
+  `SYSTEM_VERSIONING = ON` that was always there. Off by default, so a schema-only script is
+  byte-for-byte what 1.7 produced. Memory-optimized temporal tables take the same route; that
+  was checked rather than assumed.
+
+- **`SqlServerSchemaExtractor.ExtractTableAsync`**, and `ExtractAsync` overloads that take an
+  open `SqlConnection` and an optional `SqlTransaction`. Two callers were paying for their
+  absence. `SyncJob`'s swap publisher ran a whole-database extract for **every table it
+  published** — on a 500-table database, fifty publications cost 1,100 round trips and 325,050
+  rows against 500 and 650 for the same work by name, which is 79× the wall clock. And a history
+  table could not be read at all: `ExtractAsync` skips it on purpose, correctly, because the
+  `SYSTEM_VERSIONING` clause creates it — but its rows are real data no other object carries, and
+  an archive that wants them has to know its shape. Asking for a table **by name** returns it,
+  history or not; the whole-database sweep is unchanged, notices included, and that was proved by
+  capturing the snapshot JSON before and after and comparing it byte for byte.
+
+- **`SqlRender.MaxDateTime2Literal(byte scale)`.** A period's end column must hold the maximum
+  value **for its own scale** on every row, and `ADD PERIOD` refuses `…59.9999999` on a
+  `datetime2(3)` column with error 13575 just as firmly as it refuses `…59.997`.
+
+### Fixed
+
+- **A table gaining a `SYSTEM_TIME` period got a migration script that could not run.** The
+  differ emitted the two period columns as separate `ALTER TABLE … ADD` statements and then the
+  `ADD PERIOD`. SQL Server refuses a `GENERATED ALWAYS` column while no period is defined
+  (13509), so the period behind it named columns that did not exist (4924) and the versioning
+  switch failed after that (13510) — the table was left exactly as it started. The two columns
+  and the period now go in one statement, each column with a default so it can be added to a
+  table that already has rows, and the two defaults are dropped on the next line because the
+  source has none and leaving them would be drift the next diff proposes to remove.
+
+  It survived 1.7 because the test covering it read the script and never ran it: the assertion
+  described the broken order and passed. That test now pins the working shape, and a live test
+  applies the script to a database with rows in it and asks the server.
+
 ## [1.7.0] - 2026-09-07
 
 ### Added
