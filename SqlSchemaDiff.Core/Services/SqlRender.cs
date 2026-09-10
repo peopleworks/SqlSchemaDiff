@@ -359,6 +359,26 @@ public static class SqlRender
     /// server does not already diagnose better. An empty table is accepted, and so is
     /// a memory-optimized one.
     /// </remarks>
+    /// <summary>
+    /// The largest value a <c>datetime2</c> of the given scale can hold, as a literal.
+    /// <para>
+    /// A period's end column must hold exactly this on every row, and "exactly" is per
+    /// scale: <c>ADD PERIOD</c> refuses a <c>datetime2(3)</c> column holding
+    /// <c>…59.9999999</c> with error 13575, and refuses <c>…59.997</c> just the same.
+    /// Anything that has to write an end value — a restore filling the column, or the
+    /// differ giving a new column a default so it can be added to a table that already
+    /// has rows — needs this and has no business computing it itself.
+    /// </para>
+    /// </summary>
+    public static string MaxDateTime2Literal(byte scale)
+    {
+        if(scale > 7)
+            throw new ArgumentOutOfRangeException(nameof(scale), scale, "datetime2 has a scale of 0 to 7.");
+
+        var fraction = scale == 0 ? string.Empty : "." + new string('9', scale);
+        return $"'9999-12-31 23:59:59{fraction}'";
+    }
+
     public static string? BuildPeriodAdd(TableModel table)
     {
         if(BuildPeriodClause(table) is not { } period)

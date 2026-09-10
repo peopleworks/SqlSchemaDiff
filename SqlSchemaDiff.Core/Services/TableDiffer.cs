@@ -71,9 +71,17 @@ public sealed class TableDiffer
         // even when the object itself is not changing.
         var rewrittenColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // A table gaining a SYSTEM_TIME period cannot receive its two period columns
+        // one statement at a time; see IsPeriodArriving. They are left out of the loop
+        // below and emitted together.
+        var arrivingPeriod = IsPeriodArriving(source, target);
+
         // ---- Columns ----
         foreach(var col in source.Columns)
         {
+            if(arrivingPeriod && IsPeriodColumn(source, col.Name))
+                continue;
+
             if(!targetCols.TryGetValue(col.Name, out var targetCol))
             {
                 columnAdds.Add($"ALTER TABLE {SqlRender.TableIdentifier(source)} ADD {SqlRender.BuildColumnDefinition(col)};");
@@ -184,7 +192,7 @@ public sealed class TableDiffer
         // Last, because the SYSTEM_VERSIONING switches wrap everything above: OFF goes
         // to the very front of the script and ON to the very end.
         changeCount += AppendSpecialTableChanges(
-            source, target, pre, post, warnings, rebuildReasons,
+            source, target, pre, columnAdds, post, warnings, rebuildReasons,
             columnsChange: columnAdds.Count > 0 || columnDrops.Count > 0);
 
         // A table this differ cannot express is normally handed to TableRebuilder,
@@ -232,8 +240,8 @@ public sealed class TableDiffer
     /// </summary>
     private static int AppendSpecialTableChanges(
         TableModel source, TableModel target,
-        List<string> pre, List<string> post, List<string> warnings, List<string> rebuildReasons,
-        bool columnsChange)
+        List<string> pre, List<string> columnAdds, List<string> post, List<string> warnings,
+        List<string> rebuildReasons, bool columnsChange)
     {
         var changes = 0;
 
@@ -288,10 +296,21 @@ public sealed class TableDiffer
             }
         }
 
-        if(SqlRender.HasSystemTimePeriod(source) && (periodMoved || !SqlRender.HasSystemTimePeriod(target)))
+        if(IsPeriodArriving(source, target))
         {
-            // After the column adds, which is where the two GENERATED ALWAYS columns
-            // the period names come from.
+            // One statement, because SQL Server will not take them separately, and with
+            // a default on each column because they are NOT NULL and the table may
+            // already have rows. The defaults are temporary scaffolding: the source has
+            // none, so leaving them behind would be drift the next diff proposes to
+            // remove. They are dropped on the next line, which SQL Server allows even
+            // though the columns are GENERATED ALWAYS by then.
+            columnAdds.AddRange(BuildPeriodArrival(source));
+            changes++;
+        }
+        else if(SqlRender.HasSystemTimePeriod(source) && (periodMoved || !SqlRender.HasSystemTimePeriod(target)))
+        {
+            // The period is moving to columns that already exist, so they are already
+            // there to be named.
             post.Add($"ALTER TABLE {SqlRender.TableIdentifier(source)} " +
                      $"ADD {SqlRender.BuildPeriodClause(source)};");
             changes++;
@@ -963,6 +982,58 @@ public sealed class TableDiffer
             dict[key(item)] = item;
         return dict;
     }
+
+    /// <summary>
+    /// True when the source declares a SYSTEM_TIME period, the target has none, and
+    /// neither period column exists on the target yet — the one case where the two
+    /// columns and the period have to arrive in a single statement.
+    /// </summary>
+    private static bool IsPeriodArriving(TableModel source, TableModel target) =>
+        SqlRender.HasSystemTimePeriod(source) &&
+        !SqlRender.HasSystemTimePeriod(target) &&
+        !target.Columns.Any(x => IsPeriodColumn(source, x.Name));
+
+    /// <summary>True when <paramref name="name"/> is one of the table's period columns.</summary>
+    private static bool IsPeriodColumn(TableModel table, string name) =>
+        string.Equals(name, table.PeriodStartColumn, StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(name, table.PeriodEndColumn, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The statements that give a table a SYSTEM_TIME period it did not have: both
+    /// columns and the period in one <c>ALTER TABLE ... ADD</c>, then the removal of
+    /// the two defaults that only existed so the columns could be added to a table
+    /// with rows in it.
+    /// </summary>
+    /// <remarks>
+    /// Measured against SQL Server 2025. Emitting the columns separately produces a
+    /// script that cannot run: a <c>GENERATED ALWAYS</c> column without a period is
+    /// refused with <b>13509</b>, and the <c>ADD PERIOD</c> that follows then names
+    /// columns that do not exist (<b>4924</b>), leaving <c>SET (SYSTEM_VERSIONING =
+    /// ON)</c> to fail with <b>13510</b>. The end column's default has to be the
+    /// maximum value <i>for its own scale</i>, or <c>ADD PERIOD</c> refuses the rows
+    /// with <b>13575</b>.
+    /// </remarks>
+    private static IEnumerable<string> BuildPeriodArrival(TableModel table)
+    {
+        var tableId = SqlRender.TableIdentifier(table);
+        var start = table.Columns.First(x => string.Equals(x.Name, table.PeriodStartColumn, StringComparison.OrdinalIgnoreCase));
+        var end = table.Columns.First(x => string.Equals(x.Name, table.PeriodEndColumn, StringComparison.OrdinalIgnoreCase));
+
+        // Named rather than left to SQL Server, so the drop below can name them too.
+        // A system-named default would have to be looked up where the script runs,
+        // which is the shape WP 1.7c had to fix four times.
+        var startDefault = $"DF_sqldiff_period_{table.Name}_{start.Name}";
+        var endDefault = $"DF_sqldiff_period_{table.Name}_{end.Name}";
+
+        yield return
+            $"ALTER TABLE {tableId} ADD" + Environment.NewLine +
+            $"    {SqlRender.BuildColumnDefinition(start)} CONSTRAINT {SqlRender.Quote(startDefault)} DEFAULT SYSUTCDATETIME()," + Environment.NewLine +
+            $"    {SqlRender.BuildColumnDefinition(end)} CONSTRAINT {SqlRender.Quote(endDefault)} DEFAULT {SqlRender.MaxDateTime2Literal(end.Scale)}," + Environment.NewLine +
+            $"    {SqlRender.BuildPeriodClause(table)};";
+
+        yield return $"ALTER TABLE {tableId} DROP CONSTRAINT {SqlRender.Quote(startDefault)}, {SqlRender.Quote(endDefault)};";
+    }
+
 }
 
 /// <summary>

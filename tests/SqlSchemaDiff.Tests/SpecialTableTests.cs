@@ -337,18 +337,38 @@ public class SpecialTableTests
         Assert.Contains("is system-versioned and cannot be rebuilt", result.Script);
     }
 
+    /// <summary>
+    /// A table gaining a period gets its two columns and the period in <b>one</b>
+    /// statement, then loses the defaults that only existed so the columns could be
+    /// added to a table with rows in it.
+    /// </summary>
+    /// <remarks>
+    /// Until 1.8 this test asserted the opposite — three separate statements — and
+    /// passed, because it read the script and never ran it. That script cannot run:
+    /// SQL Server refuses a <c>GENERATED ALWAYS</c> column while no period is defined
+    /// (13509), so the <c>ADD PERIOD</c> behind it names columns that do not exist
+    /// (4924) and the versioning switch fails after that (13510). Measured on SQL
+    /// Server 2025. <c>PeriodArrivalLiveTests</c> now runs the script; this one only
+    /// pins its shape.
+    /// </remarks>
     [Fact]
-    public void AddingAPeriodToATableThatHasNone_AddsTheColumnsThenThePeriodThenTheVersioning()
+    public void AddingAPeriodToATableThatHasNone_AddsBothColumnsAndThePeriodInOneStatement()
     {
         var target = Table("Employee", Col("EmployeeId", nullable: false), NVarchar("FullName", 80, nullable: false));
 
         var result = _differ.Diff(Employee(), target, includeDrops: true);
 
         AssertOrder(result.Script,
-            "ADD [ValidFrom] datetime2(7) GENERATED ALWAYS AS ROW START HIDDEN NOT NULL;",
-            "ADD [ValidTo] datetime2(7) GENERATED ALWAYS AS ROW END HIDDEN NOT NULL;",
-            "ALTER TABLE [dbo].[Employee] ADD PERIOD FOR SYSTEM_TIME ([ValidFrom], [ValidTo]);",
+            "ALTER TABLE [dbo].[Employee] ADD",
+            "[ValidFrom] datetime2(7) GENERATED ALWAYS AS ROW START HIDDEN NOT NULL CONSTRAINT [DF_sqldiff_period_Employee_ValidFrom] DEFAULT SYSUTCDATETIME(),",
+            "[ValidTo] datetime2(7) GENERATED ALWAYS AS ROW END HIDDEN NOT NULL CONSTRAINT [DF_sqldiff_period_Employee_ValidTo] DEFAULT '9999-12-31 23:59:59.9999999',",
+            "PERIOD FOR SYSTEM_TIME ([ValidFrom], [ValidTo]);",
+            "ALTER TABLE [dbo].[Employee] DROP CONSTRAINT [DF_sqldiff_period_Employee_ValidFrom], [DF_sqldiff_period_Employee_ValidTo];",
             "SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = [dbo].[EmployeeHistory]));");
+
+        // The period columns must not also be emitted one at a time - that is the
+        // statement the server refuses with 13509.
+        Assert.DoesNotContain("ADD [ValidFrom] datetime2(7) GENERATED ALWAYS", result.Script, StringComparison.Ordinal);
     }
 
     [Fact]
