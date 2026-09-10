@@ -370,6 +370,26 @@ public static class SqlRender
     /// has rows — needs this and has no business computing it itself.
     /// </para>
     /// </summary>
+    /// <summary>
+    /// The earliest value a <c>datetime2</c> can hold, as a literal. Exact at every
+    /// scale, so it needs none.
+    /// <para>
+    /// This is what a period's start column is given for rows that existed before the
+    /// table was versioned. Their real start is not knowable — the table was not
+    /// recording it — and this says so, rather than claiming they began at the moment
+    /// the migration happened to run.
+    /// </para>
+    /// </summary>
+    /// <remarks>
+    /// It also has to be a value in the past, and <c>SYSUTCDATETIME()</c> is not
+    /// reliably one: <c>ADD PERIOD</c> refuses a table whose open rows start in the
+    /// future (13542), and a default evaluated as the statement writes the rows can
+    /// land after the instant the check compares against. That race is invisible on one
+    /// machine and reproducible on another — it passed on SQL Server 2025 locally and
+    /// failed on a 2022 container in CI. A constant cannot lose it.
+    /// </remarks>
+    public static string MinDateTime2Literal => "'0001-01-01 00:00:00'";
+
     public static string MaxDateTime2Literal(byte scale)
     {
         if(scale > 7)

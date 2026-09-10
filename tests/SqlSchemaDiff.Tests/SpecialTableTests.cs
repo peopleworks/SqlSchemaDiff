@@ -360,7 +360,7 @@ public class SpecialTableTests
 
         AssertOrder(result.Script,
             "ALTER TABLE [dbo].[Employee] ADD",
-            "[ValidFrom] datetime2(7) GENERATED ALWAYS AS ROW START HIDDEN NOT NULL CONSTRAINT [DF_sqldiff_period_Employee_ValidFrom] DEFAULT SYSUTCDATETIME(),",
+            "[ValidFrom] datetime2(7) GENERATED ALWAYS AS ROW START HIDDEN NOT NULL CONSTRAINT [DF_sqldiff_period_Employee_ValidFrom] DEFAULT '0001-01-01 00:00:00',",
             "[ValidTo] datetime2(7) GENERATED ALWAYS AS ROW END HIDDEN NOT NULL CONSTRAINT [DF_sqldiff_period_Employee_ValidTo] DEFAULT '9999-12-31 23:59:59.9999999',",
             "PERIOD FOR SYSTEM_TIME ([ValidFrom], [ValidTo]);",
             "ALTER TABLE [dbo].[Employee] DROP CONSTRAINT [DF_sqldiff_period_Employee_ValidFrom], [DF_sqldiff_period_Employee_ValidTo];",

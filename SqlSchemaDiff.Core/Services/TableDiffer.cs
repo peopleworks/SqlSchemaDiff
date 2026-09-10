@@ -1019,6 +1019,11 @@ public sealed class TableDiffer
         var start = table.Columns.First(x => string.Equals(x.Name, table.PeriodStartColumn, StringComparison.OrdinalIgnoreCase));
         var end = table.Columns.First(x => string.Equals(x.Name, table.PeriodEndColumn, StringComparison.OrdinalIgnoreCase));
 
+        // The start default is the earliest datetime2 there is, not "now": these rows
+        // existed before the table was versioned and their real start is not knowable,
+        // and a "now" default can be refused outright by ADD PERIOD as a start in the
+        // future (13542). See SqlRender.MinDateTime2Literal.
+        //
         // Named rather than left to SQL Server, so the drop below can name them too.
         // A system-named default would have to be looked up where the script runs,
         // which is the shape WP 1.7c had to fix four times.
@@ -1027,7 +1032,7 @@ public sealed class TableDiffer
 
         yield return
             $"ALTER TABLE {tableId} ADD" + Environment.NewLine +
-            $"    {SqlRender.BuildColumnDefinition(start)} CONSTRAINT {SqlRender.Quote(startDefault)} DEFAULT SYSUTCDATETIME()," + Environment.NewLine +
+            $"    {SqlRender.BuildColumnDefinition(start)} CONSTRAINT {SqlRender.Quote(startDefault)} DEFAULT {SqlRender.MinDateTime2Literal}," + Environment.NewLine +
             $"    {SqlRender.BuildColumnDefinition(end)} CONSTRAINT {SqlRender.Quote(endDefault)} DEFAULT {SqlRender.MaxDateTime2Literal(end.Scale)}," + Environment.NewLine +
             $"    {SqlRender.BuildPeriodClause(table)};";
 
