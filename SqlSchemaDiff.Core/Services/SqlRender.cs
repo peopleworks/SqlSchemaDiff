@@ -927,14 +927,32 @@ public static class SqlRender
     /// a second time.
     /// </para>
     /// </summary>
+    /// <remarks>
+    /// <b>This exact signature is part of the binary contract and must not change.</b>
+    /// 1.8.0 replaced it with an overload taking an optional <c>deferPeriod</c>
+    /// parameter. That is invisible to anyone who recompiles, and fatal to anyone who
+    /// does not: an optional parameter is a different method in IL, so an assembly
+    /// already built against 1.7 - <c>PeopleWorks.SyncJob.Core</c> 1.0.0, on nuget.org -
+    /// failed at run time with <c>MissingMethodException</c> the first time it created
+    /// a staging table. Restored in 1.8.1 as a method of its own, and package validation
+    /// now fails the build on any change like it.
+    /// </remarks>
+    public static string BuildTableCreateOnly(TableModel table) =>
+        BuildTableCreateOnly(table, deferPeriod: false);
+
+    /// <summary>
+    /// The same <c>CREATE TABLE</c>, with the choice of leaving a <c>SYSTEM_TIME</c>
+    /// period out of it.
+    /// </summary>
+    /// <param name="table">The table to render.</param>
     /// <param name="deferPeriod">
     /// When true, a <c>SYSTEM_TIME</c> period is left out of the CREATE entirely: the
     /// two period columns come out as plain <c>datetime2 NOT NULL</c>, with no
     /// <c>GENERATED ALWAYS</c> and no <c>HIDDEN</c>, and the caller is responsible for
-    /// emitting <see cref="BuildPeriodAdd"/> once the rows are loaded. Off by default,
-    /// which is what every existing caller — the diff path included — gets.
+    /// emitting <see cref="BuildPeriodAdd"/> once the rows are loaded. Deliberately not
+    /// optional - see the one-argument overload for what an optional parameter here cost.
     /// </param>
-    public static string BuildTableCreateOnly(TableModel table, bool deferPeriod = false)
+    public static string BuildTableCreateOnly(TableModel table, bool deferPeriod)
     {
         // A period cannot be deferred if there is none; asking for it on an ordinary
         // table is a no-op rather than an error, so a caller can pass the option

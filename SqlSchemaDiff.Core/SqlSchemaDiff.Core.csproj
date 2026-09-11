@@ -12,7 +12,23 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <Version>1.8.0</Version>
+    <Version>1.8.1</Version>
+
+    <!-- The public API is additive-only until 2.0, and "additive" is a promise about
+         compiled assemblies, not about source. 1.8.0 broke it without a single test
+         noticing: it turned BuildTableCreateOnly(TableModel) into an overload with an
+         optional parameter, which recompiles cleanly and is a different method in IL,
+         so PeopleWorks.SyncJob.Core 1.0.0 - built against 1.7 - threw
+         MissingMethodException in production code the first time it made a staging
+         table. Package validation compares this build against the baseline package on
+         nuget.org at `dotnet pack` and fails on anything removed or changed.
+
+         The baseline is 1.7.0 for this release on purpose: 1.8.0 was never validated,
+         so checking against it would bless the break. After each release, move it to
+         the version just published; every release is then a superset of the one
+         before, and so of all of them. -->
+    <EnablePackageValidation>true</EnablePackageValidation>
+    <PackageValidationBaselineVersion>1.7.0</PackageValidationBaselineVersion>
     <!-- The package carries the family name since 1.6.0; the assembly and the
          namespaces do not, so a consumer only changes its PackageReference. The
          1.5.0 ids SqlSchemaDiff.Core / SqlSchemaDiff.Cli are deprecated on nuget.org

@@ -4,6 +4,34 @@ All notable changes to SQLDiff are recorded here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.1] - 2026-09-10
+
+### Fixed
+
+- **1.8.0 broke every assembly already compiled against 1.7, at run time.** It turned
+  `SqlRender.BuildTableCreateOnly(TableModel)` into `BuildTableCreateOnly(TableModel, bool
+  deferPeriod = false)`. That recompiles without a murmur, which is why none of the 418 tests
+  noticed — they recompile. But an optional parameter is a different method in IL, and a DLL
+  built against 1.7 binds to the one that no longer existed: **`PeopleWorks.SyncJob.Core` 1.0.0,
+  as published, threw `MissingMethodException` the first time it created a staging table.**
+  Found within the hour, by moving SqlArchive — which depends on both packages — onto 1.8.0
+  before building anything on it. The one-argument method is back as a method of its own; the
+  two-argument one no longer has a default, so the two can never collapse into one again.
+  Proved end to end: SqlArchive's ten live import tests, nine of which failed on 1.8.0, pass
+  against 1.8.1 with SyncJob.Core 1.0.0's published binary.
+
+### Added
+
+- **Package validation.** "Additive only until 2.0" is a promise about compiled assemblies, and
+  nothing checked it. `dotnet pack` now compares the build with the baseline package on
+  nuget.org and fails on anything removed or changed. It was proved to catch this exact break:
+  with 1.8.0's signature restored, the code compiles and the pack fails with `CP0002`, naming
+  the missing member. The baseline is 1.7.0 for this release, because 1.8.0 was never validated
+  and checking against it would bless the break; it moves to the version just published after
+  each release.
+
+If you took 1.8.0 into a project that also references `PeopleWorks.SyncJob.Core`, move to 1.8.1.
+
 ## [1.8.0] - 2026-09-10
 
 Everything here exists because a database restored from an archive was losing the history of
